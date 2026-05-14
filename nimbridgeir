@@ -4,7 +4,7 @@
 
 set -uo pipefail
 
-NBI_VERSION="0.1.0"
+NBI_VERSION="0.1.2"
 APP_NAME="NimBridgeIR"
 APP_CMD="nimbridgeir"
 
@@ -40,6 +40,7 @@ STATE_DIR="/var/lib/nimbridgeir"
 BACKUP_DIR="$STATE_DIR/backups"
 BASELINE_DIR="$STATE_DIR/baseline"
 LOG_FILE="/var/log/nimbridgeir.log"
+DOCKER_SYSTEMD_PROXY_CONF="/etc/systemd/system/docker.service.d/nimbridgeir-access.conf"
 UNINSTALLER="/usr/local/lib/nimbridgeir/uninstall.sh"
 
 # -----------------------------------------------------------------------------
@@ -170,6 +171,14 @@ proxy_url() {
   fi
 }
 
+systemd_env_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '%s' "$value"
+}
+
 masked_proxy() {
   if [[ -z "${NBI_PROXY_HOST:-}" ]]; then
     printf 'not configured'
@@ -277,25 +286,49 @@ EOF_APT
 
 backup_docker_once() {
   mkdir -p "$BASELINE_DIR/docker"
-  [[ -f "$BASELINE_DIR/docker/marker" ]] && return 0
-  if [[ -f /etc/docker/daemon.json ]]; then
-    mkdir -p "$BASELINE_DIR/docker"
-    cp -a /etc/docker/daemon.json "$BASELINE_DIR/docker/daemon.json"
-    printf 'file' > "$BASELINE_DIR/docker/marker"
-  else
-    printf 'absent' > "$BASELINE_DIR/docker/marker"
+
+  # v0.1.0/v0.1.1 used "marker" for daemon.json. Keep compatibility.
+  if [[ ! -f "$BASELINE_DIR/docker/daemon.marker" ]]; then
+    if [[ -f "$BASELINE_DIR/docker/marker" ]]; then
+      cp -a "$BASELINE_DIR/docker/marker" "$BASELINE_DIR/docker/daemon.marker"
+    elif [[ -f /etc/docker/daemon.json ]]; then
+      cp -a /etc/docker/daemon.json "$BASELINE_DIR/docker/daemon.json"
+      printf 'file' > "$BASELINE_DIR/docker/daemon.marker"
+    else
+      printf 'absent' > "$BASELINE_DIR/docker/daemon.marker"
+    fi
+  fi
+
+  if [[ ! -f "$BASELINE_DIR/docker/systemd.marker" ]]; then
+    if [[ -f "$DOCKER_SYSTEMD_PROXY_CONF" ]]; then
+      cp -a "$DOCKER_SYSTEMD_PROXY_CONF" "$BASELINE_DIR/docker/systemd-proxy.conf"
+      printf 'file' > "$BASELINE_DIR/docker/systemd.marker"
+    else
+      printf 'absent' > "$BASELINE_DIR/docker/systemd.marker"
+    fi
   fi
 }
 
 restore_docker_baseline() {
-  [[ -f "$BASELINE_DIR/docker/marker" ]] || return 0
+  local daemon_marker="$BASELINE_DIR/docker/daemon.marker"
+  [[ -f "$daemon_marker" ]] || daemon_marker="$BASELINE_DIR/docker/marker"
+
   mkdir -p /etc/docker
-  if grep -qx 'file' "$BASELINE_DIR/docker/marker"; then
+  if [[ -f "$daemon_marker" ]] && grep -qx 'file' "$daemon_marker"; then
     cp -a "$BASELINE_DIR/docker/daemon.json" /etc/docker/daemon.json
-  else
+  elif [[ -f "$daemon_marker" ]]; then
     rm -f /etc/docker/daemon.json
   fi
+
+  if [[ -f "$BASELINE_DIR/docker/systemd.marker" ]] && grep -qx 'file' "$BASELINE_DIR/docker/systemd.marker"; then
+    mkdir -p "$(dirname "$DOCKER_SYSTEMD_PROXY_CONF")"
+    cp -a "$BASELINE_DIR/docker/systemd-proxy.conf" "$DOCKER_SYSTEMD_PROXY_CONF"
+  else
+    rm -f "$DOCKER_SYSTEMD_PROXY_CONF"
+  fi
+
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart docker >/dev/null 2>&1 || true
   fi
   NBI_DOCKER_ACCESS_CONFIGURED=0
@@ -408,12 +441,16 @@ ensure_ready() {
 
 run_access() {
   ensure_ready || return 1
-  proxychains4 -q -f "$ENGINE_CONF" "$@"
+  env -u http_proxy -u https_proxy -u ftp_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u FTP_PROXY -u ALL_PROXY \
+      proxychains4 -q -f "$ENGINE_CONF" "$@"
 }
 
 run_access_quiet() {
   ensure_ready >/dev/null 2>&1 || return 1
-  proxychains4 -q -f "$ENGINE_CONF" "$@"
+  env -u http_proxy -u https_proxy -u ftp_proxy -u all_proxy \
+      -u HTTP_PROXY -u HTTPS_PROXY -u FTP_PROXY -u ALL_PROXY \
+      proxychains4 -q -f "$ENGINE_CONF" "$@"
 }
 
 with_temp_apt_proxy() {
@@ -504,13 +541,12 @@ update_ubuntu_packages() {
   print_header
   bold "Update Ubuntu Packages"
   printf 'Updating Ubuntu package lists...\n'
-  with_temp_apt_proxy "$(proxy_url)"
+  cleanup_temp_access_files
   if run_access apt-get update; then
     ok "Ubuntu package lists updated."
   else
     err "Update failed."
   fi
-  remove_temp_apt_proxy
   pause
 }
 
@@ -523,22 +559,19 @@ install_ubuntu_package() {
     err "Invalid package name."
     pause; return 1
   fi
-  with_temp_apt_proxy "$(proxy_url)"
+  cleanup_temp_access_files
   if run_access apt-get install -y "$pkg"; then
     ok "Package installed: $pkg"
   else
     err "Package installation failed: $pkg"
   fi
-  remove_temp_apt_proxy
   pause
 }
 
 configure_apt_basic_dependencies() {
-  with_temp_apt_proxy "$(proxy_url)"
+  cleanup_temp_access_files
   run_access apt-get update && run_access apt-get install -y curl wget ca-certificates gnupg git lsb-release
-  local rc=$?
-  remove_temp_apt_proxy
-  return "$rc"
+  return "$?"
 }
 
 download_file() {
@@ -654,6 +687,20 @@ os.replace(tmp, path)
 PY
 
   if command -v systemctl >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$DOCKER_SYSTEMD_PROXY_CONF")"
+    local proxy_escaped no_proxy_escaped
+    proxy_escaped="$(systemd_env_escape "$proxy")"
+    no_proxy_escaped="$(systemd_env_escape "$no_proxy")"
+    cat > "$DOCKER_SYSTEMD_PROXY_CONF" <<EOF_DOCKER_PROXY
+[Service]
+Environment="HTTP_PROXY=$proxy_escaped"
+Environment="HTTPS_PROXY=$proxy_escaped"
+Environment="NO_PROXY=$no_proxy_escaped"
+Environment="http_proxy=$proxy_escaped"
+Environment="https_proxy=$proxy_escaped"
+Environment="no_proxy=$no_proxy_escaped"
+EOF_DOCKER_PROXY
+
     systemctl daemon-reload || true
     systemctl restart docker || {
       err "Docker restart failed. Restoring previous Docker configuration."
@@ -699,14 +746,12 @@ install_docker() {
 
   echo "deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" > /etc/apt/sources.list.d/docker.list
 
-  with_temp_apt_proxy "$(proxy_url)"
+  cleanup_temp_access_files
   if run_access apt-get update && run_access apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
-    remove_temp_apt_proxy
     systemctl enable --now docker >/dev/null 2>&1 || true
     configure_docker_access || true
     ok "Docker installed."
   else
-    remove_temp_apt_proxy
     err "Docker installation failed."
   fi
   pause
