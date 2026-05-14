@@ -456,9 +456,8 @@ Settings > Reconfigure Access
 اگر این ابزار برای شما مفید بود، می‌توانید از پروژه حمایت کنید.
 
 ```text
-USDT TRC20: YOUR_TRC20_WALLET_HERE
-USDT ERC20: YOUR_ERC20_WALLET_HERE
-BTC: YOUR_BTC_WALLET_HERE
-TON: YOUR_TON_WALLET_HERE
+USDT TRC20: TZEkPk6pmxRPFsAXWe7jSqfmwFeEYcxRYq
+USDT BEP20: 0x66F98e2980906503f0B4a5E9d14A5BfD7d2aB008
+TON: UQDN_FNnzZHr7qks6XRV1k9JKHFfPZ2frq_oymluJksa2MRe
 ```
 
