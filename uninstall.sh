@@ -9,6 +9,7 @@ INSTALL_BIN="/usr/local/bin/nimbridgeir"
 SHORT_BIN="/usr/local/bin/nbi"
 LIB_DIR="/usr/local/lib/nimbridgeir"
 LOG_FILE="/var/log/nimbridgeir.log"
+DOCKER_SYSTEMD_PROXY_CONF="/etc/systemd/system/docker.service.d/nimbridgeir-access.conf"
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -18,14 +19,27 @@ require_root() {
 }
 
 restore_docker_baseline() {
-  [[ -f "$BASELINE_DIR/docker/marker" ]] || return 0
-  mkdir -p /etc/docker
-  if grep -qx 'file' "$BASELINE_DIR/docker/marker"; then
-    cp -a "$BASELINE_DIR/docker/daemon.json" /etc/docker/daemon.json
-  else
-    rm -f /etc/docker/daemon.json
+  local daemon_marker="$BASELINE_DIR/docker/daemon.marker"
+  [[ -f "$daemon_marker" ]] || daemon_marker="$BASELINE_DIR/docker/marker"
+
+  if [[ -f "$daemon_marker" ]]; then
+    mkdir -p /etc/docker
+    if grep -qx 'file' "$daemon_marker"; then
+      cp -a "$BASELINE_DIR/docker/daemon.json" /etc/docker/daemon.json
+    else
+      rm -f /etc/docker/daemon.json
+    fi
   fi
+
+  if [[ -f "$BASELINE_DIR/docker/systemd.marker" ]] && grep -qx 'file' "$BASELINE_DIR/docker/systemd.marker"; then
+    mkdir -p "$(dirname "$DOCKER_SYSTEMD_PROXY_CONF")"
+    cp -a "$BASELINE_DIR/docker/systemd-proxy.conf" "$DOCKER_SYSTEMD_PROXY_CONF"
+  else
+    rm -f "$DOCKER_SYSTEMD_PROXY_CONF"
+  fi
+
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart docker >/dev/null 2>&1 || true
   fi
 }
@@ -49,8 +63,8 @@ main() {
         cat <<EOF_HELP
 Usage: sudo bash uninstall.sh [--no-restore] [--purge]
 
-  --no-restore   Do not restore Docker/system access configuration
-  --purge        Remove /etc/nimbridgeir and /var/lib/nimbridgeir too
+  --no-restore   Do not restore Docker/system settings
+  --purge        Remove saved settings, logs and backups too
 EOF_HELP
         exit 0
         ;;
@@ -73,7 +87,7 @@ EOF_HELP
 
   echo "$APP_NAME uninstalled."
   if [[ "$remove_state" != "yes" ]]; then
-    echo "Config/state kept. Use --purge to remove them."
+    echo "Saved settings and logs were kept. Use --purge to remove them."
   fi
 }
 

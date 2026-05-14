@@ -4,16 +4,15 @@
 
 set -uo pipefail
 
-NBI_VERSION="0.1.2"
+NBI_VERSION="0.1.3"
 APP_NAME="NimBridgeIR"
 APP_CMD="nimbridgeir"
 
 # -----------------------------------------------------------------------------
-# EDITABLE DEFAULTS FOR PROJECT MAINTAINER
+# Release defaults
 # -----------------------------------------------------------------------------
-# These are only used during the hidden bootstrap step when required packages are
-# not available yet. After bootstrap, the original system configuration is
-# restored unless the user explicitly disables restore behavior.
+# These values are used only while preparing the server for the first time.
+# After preparation, the previous system configuration is restored automatically.
 
 NBI_BOOTSTRAP_DNS_1="${NBI_BOOTSTRAP_DNS_1:-217.218.127.127}"
 NBI_BOOTSTRAP_DNS_2="${NBI_BOOTSTRAP_DNS_2:-217.218.155.155}"
@@ -453,18 +452,6 @@ run_access_quiet() {
       proxychains4 -q -f "$ENGINE_CONF" "$@"
 }
 
-with_temp_apt_proxy() {
-  local proxy="$1"
-  cat > /etc/apt/apt.conf.d/99nimbridgeir-access <<EOF_APTPROXY
-Acquire::http::Proxy "$proxy";
-Acquire::https::Proxy "$proxy";
-EOF_APTPROXY
-}
-
-remove_temp_apt_proxy() {
-  rm -f /etc/apt/apt.conf.d/99nimbridgeir-access
-}
-
 # -----------------------------------------------------------------------------
 # User actions
 # -----------------------------------------------------------------------------
@@ -590,41 +577,6 @@ download_file() {
   else
     err "Download failed."
   fi
-  pause
-}
-
-clone_github_repo() {
-  print_header
-  bold "Clone GitHub Repository"
-  local repo dest
-  read -rp 'Repository URL: ' repo
-  read -rp 'Destination path: ' dest
-  if [[ -z "$repo" ]]; then
-    err "Repository URL is required."
-    pause; return 1
-  fi
-  if [[ -z "$dest" ]]; then
-    dest="$(basename "$repo" .git)"
-  fi
-  if run_access git clone "$repo" "$dest"; then
-    ok "Repository cloned to $dest"
-  else
-    err "Clone failed."
-  fi
-  pause
-}
-
-run_custom_command() {
-  print_header
-  bold "Run Custom Command"
-  printf 'Command will be executed through %s.\n\n' "$APP_NAME"
-  local cmd
-  read -rp 'Command: ' cmd
-  if [[ -z "$cmd" ]]; then
-    err "Command cannot be empty."
-    pause; return 1
-  fi
-  run_access bash -lc "$cmd"
   pause
 }
 
@@ -766,7 +718,7 @@ check_docker_access() {
   if docker pull hello-world:latest; then
     ok "Docker access is working."
   else
-    err "Docker access failed. Try another proxy or use Load Docker Image from File."
+    err "Docker access failed. Check your proxy details or try another proxy."
   fi
   pause
 }
@@ -785,74 +737,61 @@ pull_docker_image() {
   if docker pull "$image"; then
     ok "Image pulled: $image"
   else
-    err "Docker pull failed. You can use Load Docker Image from File."
+    err "Docker pull failed. Check your proxy details or try another proxy."
   fi
   pause
 }
 
-load_docker_image() {
+docker_access_enabled() {
+  load_config
+  [[ "${NBI_DOCKER_ACCESS_CONFIGURED:-0}" == "1" || -f "$DOCKER_SYSTEMD_PROXY_CONF" ]]
+}
+
+enable_docker_access_menu() {
   print_header
-  bold "Load Docker Image from File"
-  docker_installed || { err "Docker is not installed."; pause; return 1; }
-  local file
-  read -rp 'Image tar file path: ' file
-  if [[ ! -f "$file" ]]; then
-    err "File not found: $file"
-    pause; return 1
-  fi
-  if docker load -i "$file"; then
-    ok "Docker image loaded."
+  bold "Enable Docker Access"
+  docker_installed || { err "Docker is not installed. Install Docker first."; pause; return 1; }
+  if configure_docker_access; then
+    ok "Docker access is enabled."
   else
-    err "Docker image load failed."
+    err "Could not enable Docker access."
   fi
   pause
 }
 
-list_docker_images() {
+disable_docker_access_menu() {
   print_header
-  bold "Docker Images"
+  bold "Disable Docker Access"
   docker_installed || { err "Docker is not installed."; pause; return 1; }
-  docker images
+  read -rp 'Disable Docker access and restore previous Docker settings? [Y/n]: ' ans
+  case "${ans:-Y}" in
+    y|Y|yes|YES)
+      restore_docker_baseline
+      ok "Docker access is disabled and previous Docker settings were restored."
+      ;;
+    *) warn "Canceled." ;;
+  esac
   pause
 }
 
-generate_docker_export_command() {
-  print_header
-  bold "Generate Image Export Command"
-  local image safe
-  read -rp 'Image name (example: nginx:latest): ' image
-  if [[ -z "$image" ]]; then
-    err "Image name is required."
-    pause; return 1
+toggle_docker_access_menu() {
+  if docker_access_enabled; then
+    disable_docker_access_menu
+  else
+    enable_docker_access_menu
   fi
-  safe="$(printf '%s' "$image" | tr '/:' '__')"
-  printf '\nRun these commands on a machine that has normal internet access:\n\n'
-  printf 'docker pull %q\n' "$image"
-  printf 'docker save -o %q.tar %q\n' "$safe" "$image"
-  printf '\nThen upload %s.tar to this server and use: Docker Tools > Load Docker Image from File\n' "$safe"
-  pause
-}
-
-remove_docker_access_config_menu() {
-  print_header
-  bold "Remove Docker Access Config"
-  restore_docker_baseline
-  ok "Docker access config removed/restored."
-  pause
 }
 
 docker_tools_menu() {
   while true; do
+    load_config
     print_header
     bold "Docker Tools"
-    cat <<'EOF_MENU'
+    cat <<EOF_MENU
 1) Install Docker
 2) Check Docker Access
 3) Pull Docker Image
-4) Load Docker Image from File
-5) List Docker Images
-6) Generate Image Export Command
-7) Remove Docker Access Config
+4) $(docker_access_enabled && printf 'Disable Docker Access' || printf 'Enable Docker Access')
 0) Back
 EOF_MENU
     printf '\nChoose: '
@@ -861,10 +800,7 @@ EOF_MENU
       1) install_docker ;;
       2) check_docker_access ;;
       3) pull_docker_image ;;
-      4) load_docker_image ;;
-      5) list_docker_images ;;
-      6) generate_docker_export_command ;;
-      7) remove_docker_access_config_menu ;;
+      4) toggle_docker_access_menu ;;
       0) return 0 ;;
       *) warn "Invalid option."; pause ;;
     esac
@@ -881,9 +817,9 @@ show_status() {
   load_config
   printf 'Access:               %s\n' "$( [[ "${NBI_ENABLED:-0}" == "1" ]] && printf 'Enabled' || printf 'Disabled' )"
   printf 'Proxy:                %s\n' "$(masked_proxy)"
-  printf 'Access engine:        %s\n' "$( engine_installed && printf 'Ready' || printf 'Not prepared' )"
+  printf 'Required tools:       %s\n' "$( engine_installed && printf 'Ready' || printf 'Not prepared' )"
   printf 'Docker:               %s\n' "$( docker_installed && printf 'Installed' || printf 'Not installed' )"
-  printf 'Docker access config: %s\n' "$( [[ "${NBI_DOCKER_ACCESS_CONFIGURED:-0}" == "1" ]] && printf 'Enabled' || printf 'Not enabled' )"
+  printf 'Docker access:        %s\n' "$( [[ "${NBI_DOCKER_ACCESS_CONFIGURED:-0}" == "1" ]] && printf 'Enabled' || printf 'Not enabled' )"
   printf 'Auto restore:         %s\n' "$( [[ "${NBI_AUTO_RESTORE_ON_DISABLE:-1}" == "1" ]] && printf 'Yes' || printf 'No' )"
   printf 'Config file:          %s\n' "$CONFIG_FILE"
   printf 'Log file:             %s\n' "$LOG_FILE"
@@ -931,30 +867,39 @@ disable_access() {
   pause
 }
 
+toggle_access_menu() {
+  load_config
+  if [[ "${NBI_ENABLED:-0}" == "1" ]]; then
+    disable_access
+  else
+    enable_access
+  fi
+}
+
 toggle_restore_behavior() {
   print_header
-  bold "Restore Behavior"
+  bold "Auto Restore on Disable"
   load_config
-  printf 'Current auto restore on disable: %s\n\n' "$( [[ "${NBI_AUTO_RESTORE_ON_DISABLE:-1}" == "1" ]] && printf 'Yes' || printf 'No' )"
-  read -rp 'Enable auto restore on disable? [Y/n]: ' ans
+  printf 'Current setting: %s\n\n' "$( [[ "${NBI_AUTO_RESTORE_ON_DISABLE:-1}" == "1" ]] && printf 'Yes' || printf 'No' )"
+  read -rp 'Restore related settings automatically when disabling NimBridgeIR? [Y/n]: ' ans
   case "${ans:-Y}" in
     y|Y|yes|YES) NBI_AUTO_RESTORE_ON_DISABLE=1 ;;
     *) NBI_AUTO_RESTORE_ON_DISABLE=0 ;;
   esac
   save_config
-  ok "Restore behavior updated."
+  ok "Auto restore setting updated."
   pause
 }
 
 reset_settings() {
   print_header
-  bold "Reset NimBridgeIR Settings"
-  read -rp 'This will remove saved proxy settings. Continue? [y/N]: ' ans
+  bold "Reset Saved Proxy Settings"
+  printf 'This removes the saved proxy details from NimBridgeIR.\n'; printf 'Docker settings are not changed by this option.\n\n'; read -rp 'Continue? [y/N]: ' ans
   case "$ans" in
     y|Y|yes|YES)
       rm -f "$CONFIG_FILE" "$ENGINE_CONF"
       create_default_config
-      ok "Settings reset."
+      ok "Saved proxy settings were reset."
       ;;
     *) warn "Canceled." ;;
   esac
@@ -966,30 +911,43 @@ uninstall_menu() {
   bold "Uninstall NimBridgeIR"
   read -rp 'Uninstall NimBridgeIR from this server? [y/N]: ' ans
   case "$ans" in
-    y|Y|yes|YES)
-      if [[ -x "$UNINSTALLER" ]]; then
-        bash "$UNINSTALLER"
-      else
-        warn "Uninstaller not found. Removing installed command only."
-        rm -f /usr/local/bin/nimbridgeir /usr/local/bin/nbi
-      fi
-      ;;
-    *) warn "Canceled."; pause ;;
+    y|Y|yes|YES) ;;
+    *) warn "Canceled."; pause; return 0 ;;
   esac
+
+  local restore_ans purge_ans args=()
+  read -rp 'Restore Docker/system settings before uninstall? [Y/n]: ' restore_ans
+  case "${restore_ans:-Y}" in
+    y|Y|yes|YES) ;;
+    *) args+=("--no-restore") ;;
+  esac
+
+  read -rp 'Remove saved settings, logs and backups too? [Y/n]: ' purge_ans
+  case "${purge_ans:-Y}" in
+    y|Y|yes|YES) args+=("--purge") ;;
+    *) ;;
+  esac
+
+  if [[ -x "$UNINSTALLER" ]]; then
+    bash "$UNINSTALLER" "${args[@]}"
+  else
+    warn "Uninstaller not found. Removing installed command only."
+    rm -f /usr/local/bin/nimbridgeir /usr/local/bin/nbi
+  fi
 }
 
 settings_menu() {
   while true; do
+    load_config
     print_header
     bold "Settings"
-    cat <<'EOF_MENU'
+    cat <<EOF_MENU
 1) Show Current Status
 2) Reconfigure Access
-3) Enable NimBridgeIR
-4) Disable NimBridgeIR
-5) Restore Behavior
-6) Reset NimBridgeIR Settings
-7) Uninstall NimBridgeIR
+3) $( [[ "${NBI_ENABLED:-0}" == "1" ]] && printf 'Disable NimBridgeIR' || printf 'Enable NimBridgeIR' )
+4) Auto Restore on Disable
+5) Reset Saved Proxy Settings
+6) Uninstall NimBridgeIR
 0) Back
 EOF_MENU
     printf '\nChoose: '
@@ -997,48 +955,56 @@ EOF_MENU
     case "$choice" in
       1) show_status ;;
       2) configure_access ;;
-      3) enable_access ;;
-      4) disable_access ;;
-      5) toggle_restore_behavior ;;
-      6) reset_settings ;;
-      7) uninstall_menu ;;
+      3) toggle_access_menu ;;
+      4) toggle_restore_behavior ;;
+      5) reset_settings ;;
+      6) uninstall_menu ;;
       0) return 0 ;;
       *) warn "Invalid option."; pause ;;
     esac
   done
 }
 
+first_run_setup() {
+  load_config
+  if has_access_config; then
+    return 0
+  fi
+
+  print_header
+  printf 'Welcome to %s.\n' "$APP_NAME"
+  printf 'Before using the menu, enter your HTTP proxy details once.\n'
+  printf 'You can change these details later from Settings.\n\n'
+  configure_access || true
+}
+
 main_menu() {
   require_root
   ensure_dirs
   load_config
+  first_run_setup
 
   while true; do
+    load_config
     print_header
     cat <<'EOF_MENU'
-1) Configure Access
-2) Check Connection
-3) Update Ubuntu Packages
-4) Install Ubuntu Package
+1) Check Connection
+2) Update Ubuntu Packages
+3) Install Ubuntu Package
+4) Docker Tools
 5) Download File
-6) Clone GitHub Repository
-7) Docker Tools
-8) Run Custom Command
-9) Settings
+6) Settings
 0) Exit
 EOF_MENU
     printf '\nChoose: '
     read -r choice
     case "$choice" in
-      1) configure_access ;;
-      2) check_connection_menu ;;
-      3) update_ubuntu_packages ;;
-      4) install_ubuntu_package ;;
+      1) check_connection_menu ;;
+      2) update_ubuntu_packages ;;
+      3) install_ubuntu_package ;;
+      4) docker_tools_menu ;;
       5) download_file ;;
-      6) clone_github_repo ;;
-      7) docker_tools_menu ;;
-      8) run_custom_command ;;
-      9) settings_menu ;;
+      6) settings_menu ;;
       0) exit 0 ;;
       *) warn "Invalid option."; pause ;;
     esac
