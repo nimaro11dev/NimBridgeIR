@@ -1,0 +1,1029 @@
+#!/usr/bin/env bash
+# NimBridgeIR - Simple access helper for Ubuntu servers in Iran
+# Created by nimaro11 dev
+
+set -uo pipefail
+
+NBI_VERSION="0.1.0"
+APP_NAME="NimBridgeIR"
+APP_CMD="nimbridgeir"
+
+# -----------------------------------------------------------------------------
+# EDITABLE DEFAULTS FOR PROJECT MAINTAINER
+# -----------------------------------------------------------------------------
+# These are only used during the hidden bootstrap step when required packages are
+# not available yet. After bootstrap, the original system configuration is
+# restored unless the user explicitly disables restore behavior.
+
+NBI_BOOTSTRAP_DNS_1="${NBI_BOOTSTRAP_DNS_1:-217.218.127.127}"
+NBI_BOOTSTRAP_DNS_2="${NBI_BOOTSTRAP_DNS_2:-217.218.155.155}"
+
+# Change this to your preferred reachable Ubuntu mirror before releasing.
+NBI_BOOTSTRAP_APT_MIRROR="${NBI_BOOTSTRAP_APT_MIRROR:-http://ubuntu.parsvds.com/ubuntu}"
+NBI_BOOTSTRAP_SECURITY_MIRROR="${NBI_BOOTSTRAP_SECURITY_MIRROR:-http://ubuntu.parsvds.com/ubuntu}"
+
+# Public endpoints used by Check Connection.
+NBI_TEST_URL_GENERAL="${NBI_TEST_URL_GENERAL:-https://example.com}"
+NBI_TEST_URL_GITHUB="${NBI_TEST_URL_GITHUB:-https://github.com}"
+NBI_TEST_URL_UBUNTU="${NBI_TEST_URL_UBUNTU:-https://archive.ubuntu.com/ubuntu/}"
+NBI_TEST_URL_DOCKER="${NBI_TEST_URL_DOCKER:-https://registry-1.docker.io/v2/}"
+
+NBI_DEFAULT_NO_PROXY="${NBI_DEFAULT_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+
+# -----------------------------------------------------------------------------
+# Internal paths
+# -----------------------------------------------------------------------------
+CONFIG_DIR="/etc/nimbridgeir"
+CONFIG_FILE="$CONFIG_DIR/config.env"
+ENGINE_CONF="$CONFIG_DIR/engine.conf"
+STATE_DIR="/var/lib/nimbridgeir"
+BACKUP_DIR="$STATE_DIR/backups"
+BASELINE_DIR="$STATE_DIR/baseline"
+LOG_FILE="/var/log/nimbridgeir.log"
+UNINSTALLER="/usr/local/lib/nimbridgeir/uninstall.sh"
+
+# -----------------------------------------------------------------------------
+# Basic UI helpers
+# -----------------------------------------------------------------------------
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+ok() { printf 'OK: %s\n' "$*"; }
+warn() { printf 'Warning: %s\n' "$*"; }
+err() { printf 'Error: %s\n' "$*" >&2; }
+
+pause() {
+  printf '\nPress Enter to continue...'
+  read -r _ || true
+}
+
+log_msg() {
+  local msg="$*"
+  mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    err "Please run as root: sudo $APP_CMD"
+    exit 1
+  fi
+}
+
+ensure_dirs() {
+  mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR"
+  chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR" 2>/dev/null || true
+}
+
+print_header() {
+  clear 2>/dev/null || true
+  bold "$APP_NAME"
+  printf 'Simple access helper for Ubuntu servers in Iran\n'
+  printf 'by nimaro11 dev | version %s\n' "$NBI_VERSION"
+  printf '%s\n\n' '----------------------------------------'
+}
+
+is_ubuntu() {
+  [[ -r /etc/os-release ]] || return 1
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [[ "${ID:-}" == "ubuntu" ]]
+}
+
+get_codename() {
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  printf '%s' "${VERSION_CODENAME:-}"
+}
+
+# -----------------------------------------------------------------------------
+# Config handling
+# -----------------------------------------------------------------------------
+
+q() { printf '%q' "$1"; }
+
+create_default_config() {
+  [[ -f "$CONFIG_FILE" ]] && return 0
+  cat > "$CONFIG_FILE" <<EOF_CONFIG
+NBI_ENABLED=0
+NBI_PROXY_HOST=
+NBI_PROXY_PORT=
+NBI_PROXY_USER=
+NBI_PROXY_PASS=
+NBI_AUTO_RESTORE_ON_DISABLE=1
+NBI_DOCKER_ACCESS_CONFIGURED=0
+NBI_NO_PROXY=$(q "$NBI_DEFAULT_NO_PROXY")
+EOF_CONFIG
+  chmod 600 "$CONFIG_FILE"
+}
+
+load_config() {
+  ensure_dirs
+  create_default_config
+  # shellcheck disable=SC1090
+  . "$CONFIG_FILE"
+}
+
+save_config() {
+  local tmp
+  tmp="$(mktemp)"
+  {
+    printf 'NBI_ENABLED=%q\n' "${NBI_ENABLED:-0}"
+    printf 'NBI_PROXY_HOST=%q\n' "${NBI_PROXY_HOST:-}"
+    printf 'NBI_PROXY_PORT=%q\n' "${NBI_PROXY_PORT:-}"
+    printf 'NBI_PROXY_USER=%q\n' "${NBI_PROXY_USER:-}"
+    printf 'NBI_PROXY_PASS=%q\n' "${NBI_PROXY_PASS:-}"
+    printf 'NBI_AUTO_RESTORE_ON_DISABLE=%q\n' "${NBI_AUTO_RESTORE_ON_DISABLE:-1}"
+    printf 'NBI_DOCKER_ACCESS_CONFIGURED=%q\n' "${NBI_DOCKER_ACCESS_CONFIGURED:-0}"
+    printf 'NBI_NO_PROXY=%q\n' "${NBI_NO_PROXY:-$NBI_DEFAULT_NO_PROXY}"
+  } > "$tmp"
+  install -m 600 "$tmp" "$CONFIG_FILE"
+  rm -f "$tmp"
+}
+
+has_access_config() {
+  [[ -n "${NBI_PROXY_HOST:-}" && -n "${NBI_PROXY_PORT:-}" ]]
+}
+
+validate_port() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -ge 1 && "$1" -le 65535 ]]
+}
+
+urlencode() {
+  local LC_ALL=C s="$1" i c out=""
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
+      *) printf -v out '%s%%%02X' "$out" "'$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+proxy_url() {
+  local host="${NBI_PROXY_HOST:-}" port="${NBI_PROXY_PORT:-}"
+  local user="${NBI_PROXY_USER:-}" pass="${NBI_PROXY_PASS:-}"
+  if [[ -n "$user" ]]; then
+    printf 'http://%s:%s@%s:%s' "$(urlencode "$user")" "$(urlencode "$pass")" "$host" "$port"
+  else
+    printf 'http://%s:%s' "$host" "$port"
+  fi
+}
+
+masked_proxy() {
+  if [[ -z "${NBI_PROXY_HOST:-}" ]]; then
+    printf 'not configured'
+  elif [[ -n "${NBI_PROXY_USER:-}" ]]; then
+    printf 'http://%s:***@%s:%s' "${NBI_PROXY_USER}" "${NBI_PROXY_HOST}" "${NBI_PROXY_PORT}"
+  else
+    printf 'http://%s:%s' "${NBI_PROXY_HOST}" "${NBI_PROXY_PORT}"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Backup / restore helpers hidden from user-facing menu
+# -----------------------------------------------------------------------------
+
+new_session_dir() {
+  local sid
+  sid="$(date '+%Y%m%d_%H%M%S')_$$"
+  mkdir -p "$BACKUP_DIR/$sid"
+  touch "$BACKUP_DIR/$sid/in-progress"
+  printf '%s' "$BACKUP_DIR/$sid"
+}
+
+backup_resolv() {
+  local session="$1"
+  mkdir -p "$session/resolv"
+  if [[ -L /etc/resolv.conf ]]; then
+    readlink /etc/resolv.conf > "$session/resolv/type-symlink"
+  elif [[ -e /etc/resolv.conf ]]; then
+    cp -a /etc/resolv.conf "$session/resolv/resolv.conf"
+    printf 'file' > "$session/resolv/type-file"
+  else
+    printf 'absent' > "$session/resolv/type-absent"
+  fi
+}
+
+restore_resolv() {
+  local session="$1"
+  [[ -d "$session/resolv" ]] || return 0
+  rm -f /etc/resolv.conf
+  if [[ -f "$session/resolv/type-symlink" ]]; then
+    ln -s "$(cat "$session/resolv/type-symlink")" /etc/resolv.conf
+  elif [[ -f "$session/resolv/type-file" ]]; then
+    cp -a "$session/resolv/resolv.conf" /etc/resolv.conf
+  else
+    rm -f /etc/resolv.conf
+  fi
+}
+
+apply_temp_dns() {
+  cat > /etc/resolv.conf <<EOF_DNS
+nameserver $NBI_BOOTSTRAP_DNS_1
+nameserver $NBI_BOOTSTRAP_DNS_2
+options timeout:2 attempts:2
+EOF_DNS
+}
+
+backup_apt_sources() {
+  local session="$1"
+  mkdir -p "$session/apt"
+  if [[ -f /etc/apt/sources.list ]]; then
+    cp -a /etc/apt/sources.list "$session/apt/sources.list"
+  else
+    printf 'absent' > "$session/apt/sources.list.absent"
+  fi
+  if [[ -d /etc/apt/sources.list.d ]]; then
+    tar -C /etc/apt -czf "$session/apt/sources.list.d.tar.gz" sources.list.d
+  else
+    printf 'absent' > "$session/apt/sources.list.d.absent"
+  fi
+}
+
+restore_apt_sources() {
+  local session="$1"
+  [[ -d "$session/apt" ]] || return 0
+  if [[ -f "$session/apt/sources.list" ]]; then
+    cp -a "$session/apt/sources.list" /etc/apt/sources.list
+  else
+    rm -f /etc/apt/sources.list
+  fi
+  rm -rf /etc/apt/sources.list.d
+  if [[ -f "$session/apt/sources.list.d.tar.gz" ]]; then
+    tar -C /etc/apt -xzf "$session/apt/sources.list.d.tar.gz"
+  else
+    mkdir -p /etc/apt/sources.list.d
+  fi
+}
+
+apply_bootstrap_apt_sources() {
+  local codename
+  codename="$(get_codename)"
+  if [[ -z "$codename" ]]; then
+    err "Cannot detect Ubuntu codename."
+    return 1
+  fi
+  mkdir -p /etc/apt/sources.list.d
+  rm -rf /etc/apt/sources.list.d
+  mkdir -p /etc/apt/sources.list.d
+  cat > /etc/apt/sources.list <<EOF_APT
+deb $NBI_BOOTSTRAP_APT_MIRROR $codename main restricted universe multiverse
+deb $NBI_BOOTSTRAP_APT_MIRROR $codename-updates main restricted universe multiverse
+deb $NBI_BOOTSTRAP_APT_MIRROR $codename-backports main restricted universe multiverse
+deb $NBI_BOOTSTRAP_SECURITY_MIRROR $codename-security main restricted universe multiverse
+EOF_APT
+}
+
+backup_docker_once() {
+  mkdir -p "$BASELINE_DIR/docker"
+  [[ -f "$BASELINE_DIR/docker/marker" ]] && return 0
+  if [[ -f /etc/docker/daemon.json ]]; then
+    mkdir -p "$BASELINE_DIR/docker"
+    cp -a /etc/docker/daemon.json "$BASELINE_DIR/docker/daemon.json"
+    printf 'file' > "$BASELINE_DIR/docker/marker"
+  else
+    printf 'absent' > "$BASELINE_DIR/docker/marker"
+  fi
+}
+
+restore_docker_baseline() {
+  [[ -f "$BASELINE_DIR/docker/marker" ]] || return 0
+  mkdir -p /etc/docker
+  if grep -qx 'file' "$BASELINE_DIR/docker/marker"; then
+    cp -a "$BASELINE_DIR/docker/daemon.json" /etc/docker/daemon.json
+  else
+    rm -f /etc/docker/daemon.json
+  fi
+  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files docker.service >/dev/null 2>&1; then
+    systemctl restart docker >/dev/null 2>&1 || true
+  fi
+  NBI_DOCKER_ACCESS_CONFIGURED=0
+  save_config
+}
+
+cleanup_temp_access_files() {
+  rm -f /etc/apt/apt.conf.d/99nimbridgeir-access 2>/dev/null || true
+  rm -f /etc/apt/sources.list.d/nimbridgeir-bootstrap.list 2>/dev/null || true
+}
+
+restore_latest_interrupted_session() {
+  local latest
+  latest="$(find "$BACKUP_DIR" -mindepth 2 -maxdepth 2 -name in-progress -type f 2>/dev/null | sed 's#/in-progress$##' | sort | tail -n 1 || true)"
+  [[ -n "$latest" ]] || return 0
+  restore_apt_sources "$latest" || true
+  restore_resolv "$latest" || true
+  rm -f "$latest/in-progress"
+  touch "$latest/restored-after-interruption"
+  cleanup_temp_access_files
+}
+
+# -----------------------------------------------------------------------------
+# Access engine internals
+# -----------------------------------------------------------------------------
+
+engine_installed() {
+  command -v proxychains4 >/dev/null 2>&1
+}
+
+write_engine_config() {
+  has_access_config || return 1
+  cat > "$ENGINE_CONF" <<EOF_ENGINE
+strict_chain
+proxy_dns
+remote_dns_subnet 224
+tcp_read_time_out 15000
+tcp_connect_time_out 8000
+
+[ProxyList]
+EOF_ENGINE
+  if [[ -n "${NBI_PROXY_USER:-}" ]]; then
+    printf 'http %s %s %s %s\n' "$NBI_PROXY_HOST" "$NBI_PROXY_PORT" "$NBI_PROXY_USER" "$NBI_PROXY_PASS" >> "$ENGINE_CONF"
+  else
+    printf 'http %s %s\n' "$NBI_PROXY_HOST" "$NBI_PROXY_PORT" >> "$ENGINE_CONF"
+  fi
+  chmod 600 "$ENGINE_CONF"
+}
+
+bootstrap_install_engine() {
+  if engine_installed; then
+    return 0
+  fi
+
+  is_ubuntu || {
+    err "$APP_NAME currently supports Ubuntu only."
+    return 1
+  }
+
+  printf 'Preparing access engine...\n'
+  local session rc
+  session="$(new_session_dir)"
+  log_msg "bootstrap session: $session"
+
+  backup_resolv "$session"
+  backup_apt_sources "$session"
+
+  apply_temp_dns || true
+  apply_bootstrap_apt_sources || true
+
+  export DEBIAN_FRONTEND=noninteractive
+  set +e
+  apt-get update
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    apt-get install -y proxychains4 curl wget ca-certificates gnupg git lsb-release
+    rc=$?
+  fi
+  restore_apt_sources "$session" || true
+  restore_resolv "$session" || true
+  cleanup_temp_access_files
+  rm -f "$session/in-progress"
+  if [[ $rc -eq 0 ]]; then
+    touch "$session/complete"
+  else
+    touch "$session/failed"
+  fi
+
+  if [[ $rc -ne 0 ]]; then
+    err "Could not prepare access engine. Check bootstrap DNS/mirror defaults in the project."
+    return "$rc"
+  fi
+
+  ok "Access engine is ready."
+}
+
+ensure_ready() {
+  load_config
+  if [[ "${NBI_ENABLED:-0}" != "1" ]]; then
+    err "$APP_NAME is disabled. Configure or enable access first."
+    return 1
+  fi
+  if ! has_access_config; then
+    err "Access is not configured."
+    return 1
+  fi
+  bootstrap_install_engine || return 1
+  write_engine_config || return 1
+}
+
+run_access() {
+  ensure_ready || return 1
+  proxychains4 -q -f "$ENGINE_CONF" "$@"
+}
+
+run_access_quiet() {
+  ensure_ready >/dev/null 2>&1 || return 1
+  proxychains4 -q -f "$ENGINE_CONF" "$@"
+}
+
+with_temp_apt_proxy() {
+  local proxy="$1"
+  cat > /etc/apt/apt.conf.d/99nimbridgeir-access <<EOF_APTPROXY
+Acquire::http::Proxy "$proxy";
+Acquire::https::Proxy "$proxy";
+EOF_APTPROXY
+}
+
+remove_temp_apt_proxy() {
+  rm -f /etc/apt/apt.conf.d/99nimbridgeir-access
+}
+
+# -----------------------------------------------------------------------------
+# User actions
+# -----------------------------------------------------------------------------
+
+configure_access() {
+  print_header
+  bold "Configure Access"
+  printf 'Enter your HTTP proxy details.\n\n'
+
+  local host port user pass
+  read -rp 'Proxy host/IP: ' host
+  read -rp 'Proxy port: ' port
+  if [[ -z "$host" ]]; then
+    err "Proxy host cannot be empty."
+    pause; return 1
+  fi
+  if ! validate_port "$port"; then
+    err "Invalid port."
+    pause; return 1
+  fi
+
+  read -rp 'Username (optional): ' user
+  if [[ -n "$user" ]]; then
+    read -rsp 'Password: ' pass
+    printf '\n'
+  else
+    pass=""
+  fi
+
+  NBI_PROXY_HOST="$host"
+  NBI_PROXY_PORT="$port"
+  NBI_PROXY_USER="$user"
+  NBI_PROXY_PASS="$pass"
+  NBI_ENABLED=1
+  save_config
+
+  if bootstrap_install_engine && write_engine_config; then
+    ok "Access configured successfully."
+    check_connection_compact || true
+  else
+    err "Access configuration failed."
+  fi
+  pause
+}
+
+check_url() {
+  local label="$1" url="$2" code
+  printf '%-20s' "$label:"
+  code="$(run_access_quiet curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 25 "$url" 2>/dev/null || printf '000')"
+  if [[ "$code" != "000" ]]; then
+    printf 'OK (%s)\n' "$code"
+    return 0
+  fi
+  printf 'Failed\n'
+  return 1
+}
+
+check_connection_compact() {
+  printf '\nChecking connection...\n'
+  check_url 'General HTTPS' "$NBI_TEST_URL_GENERAL" || true
+  check_url 'Ubuntu packages' "$NBI_TEST_URL_UBUNTU" || true
+  check_url 'GitHub' "$NBI_TEST_URL_GITHUB" || true
+  check_url 'Docker registry' "$NBI_TEST_URL_DOCKER" || true
+}
+
+check_connection_menu() {
+  print_header
+  bold "Check Connection"
+  check_connection_compact
+  pause
+}
+
+update_ubuntu_packages() {
+  print_header
+  bold "Update Ubuntu Packages"
+  printf 'Updating Ubuntu package lists...\n'
+  with_temp_apt_proxy "$(proxy_url)"
+  if run_access apt-get update; then
+    ok "Ubuntu package lists updated."
+  else
+    err "Update failed."
+  fi
+  remove_temp_apt_proxy
+  pause
+}
+
+install_ubuntu_package() {
+  print_header
+  bold "Install Ubuntu Package"
+  local pkg
+  read -rp 'Package name: ' pkg
+  if [[ ! "$pkg" =~ ^[A-Za-z0-9.+:_-]+$ ]]; then
+    err "Invalid package name."
+    pause; return 1
+  fi
+  with_temp_apt_proxy "$(proxy_url)"
+  if run_access apt-get install -y "$pkg"; then
+    ok "Package installed: $pkg"
+  else
+    err "Package installation failed: $pkg"
+  fi
+  remove_temp_apt_proxy
+  pause
+}
+
+configure_apt_basic_dependencies() {
+  with_temp_apt_proxy "$(proxy_url)"
+  run_access apt-get update && run_access apt-get install -y curl wget ca-certificates gnupg git lsb-release
+  local rc=$?
+  remove_temp_apt_proxy
+  return "$rc"
+}
+
+download_file() {
+  print_header
+  bold "Download File"
+  local url out
+  read -rp 'File URL: ' url
+  read -rp 'Save as: ' out
+  if [[ -z "$url" || -z "$out" ]]; then
+    err "URL and output path are required."
+    pause; return 1
+  fi
+  mkdir -p "$(dirname "$out")" 2>/dev/null || true
+  if run_access curl -L --fail --progress-bar -o "$out" "$url"; then
+    ok "Downloaded to $out"
+  else
+    err "Download failed."
+  fi
+  pause
+}
+
+clone_github_repo() {
+  print_header
+  bold "Clone GitHub Repository"
+  local repo dest
+  read -rp 'Repository URL: ' repo
+  read -rp 'Destination path: ' dest
+  if [[ -z "$repo" ]]; then
+    err "Repository URL is required."
+    pause; return 1
+  fi
+  if [[ -z "$dest" ]]; then
+    dest="$(basename "$repo" .git)"
+  fi
+  if run_access git clone "$repo" "$dest"; then
+    ok "Repository cloned to $dest"
+  else
+    err "Clone failed."
+  fi
+  pause
+}
+
+run_custom_command() {
+  print_header
+  bold "Run Custom Command"
+  printf 'Command will be executed through %s.\n\n' "$APP_NAME"
+  local cmd
+  read -rp 'Command: ' cmd
+  if [[ -z "$cmd" ]]; then
+    err "Command cannot be empty."
+    pause; return 1
+  fi
+  run_access bash -lc "$cmd"
+  pause
+}
+
+# -----------------------------------------------------------------------------
+# Docker tools
+# -----------------------------------------------------------------------------
+
+docker_installed() {
+  command -v docker >/dev/null 2>&1
+}
+
+configure_docker_access() {
+  load_config
+  has_access_config || {
+    err "Configure access first."
+    return 1
+  }
+  docker_installed || {
+    err "Docker is not installed yet."
+    return 1
+  }
+
+  backup_docker_once
+  mkdir -p /etc/docker
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    err "python3 is required to safely update Docker configuration."
+    return 1
+  fi
+
+  local proxy no_proxy
+  proxy="$(proxy_url)"
+  no_proxy="${NBI_NO_PROXY:-$NBI_DEFAULT_NO_PROXY}"
+
+  python3 - "$proxy" "$no_proxy" <<'PY'
+import json
+import os
+import sys
+
+path = "/etc/docker/daemon.json"
+proxy = sys.argv[1]
+no_proxy = sys.argv[2]
+
+cfg = {}
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+cfg["proxies"] = {
+    "http-proxy": proxy,
+    "https-proxy": proxy,
+    "no-proxy": no_proxy,
+}
+
+tmp = path + ".nimbridgeir.tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PY
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl restart docker || {
+      err "Docker restart failed. Restoring previous Docker configuration."
+      restore_docker_baseline
+      return 1
+    }
+  fi
+
+  NBI_DOCKER_ACCESS_CONFIGURED=1
+  save_config
+  ok "Docker access configured."
+}
+
+install_docker() {
+  print_header
+  bold "Install Docker"
+  is_ubuntu || { err "$APP_NAME currently supports Ubuntu only."; pause; return 1; }
+  ensure_ready || { pause; return 1; }
+
+  if docker_installed; then
+    ok "Docker is already installed."
+    configure_docker_access || true
+    pause; return 0
+  fi
+
+  printf 'Installing Docker...\n'
+  configure_apt_basic_dependencies || warn "Could not refresh some basic dependencies. Continuing..."
+
+  install -m 0755 -d /etc/apt/keyrings
+  if ! run_access curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc; then
+    err "Could not download Docker GPG key."
+    pause; return 1
+  fi
+  chmod a+r /etc/apt/keyrings/docker.asc
+
+  local codename arch
+  codename="$(get_codename)"
+  arch="$(dpkg --print-architecture)"
+  if [[ -z "$codename" || -z "$arch" ]]; then
+    err "Cannot detect Ubuntu codename or architecture."
+    pause; return 1
+  fi
+
+  echo "deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $codename stable" > /etc/apt/sources.list.d/docker.list
+
+  with_temp_apt_proxy "$(proxy_url)"
+  if run_access apt-get update && run_access apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    remove_temp_apt_proxy
+    systemctl enable --now docker >/dev/null 2>&1 || true
+    configure_docker_access || true
+    ok "Docker installed."
+  else
+    remove_temp_apt_proxy
+    err "Docker installation failed."
+  fi
+  pause
+}
+
+check_docker_access() {
+  print_header
+  bold "Check Docker Access"
+  docker_installed || { err "Docker is not installed."; pause; return 1; }
+  configure_docker_access || true
+  printf 'Checking Docker registry access...\n'
+  if docker pull hello-world:latest; then
+    ok "Docker access is working."
+  else
+    err "Docker access failed. Try another proxy or use Load Docker Image from File."
+  fi
+  pause
+}
+
+pull_docker_image() {
+  print_header
+  bold "Pull Docker Image"
+  docker_installed || { err "Docker is not installed."; pause; return 1; }
+  configure_docker_access || true
+  local image
+  read -rp 'Image name (example: nginx:latest): ' image
+  if [[ -z "$image" ]]; then
+    err "Image name is required."
+    pause; return 1
+  fi
+  if docker pull "$image"; then
+    ok "Image pulled: $image"
+  else
+    err "Docker pull failed. You can use Load Docker Image from File."
+  fi
+  pause
+}
+
+load_docker_image() {
+  print_header
+  bold "Load Docker Image from File"
+  docker_installed || { err "Docker is not installed."; pause; return 1; }
+  local file
+  read -rp 'Image tar file path: ' file
+  if [[ ! -f "$file" ]]; then
+    err "File not found: $file"
+    pause; return 1
+  fi
+  if docker load -i "$file"; then
+    ok "Docker image loaded."
+  else
+    err "Docker image load failed."
+  fi
+  pause
+}
+
+list_docker_images() {
+  print_header
+  bold "Docker Images"
+  docker_installed || { err "Docker is not installed."; pause; return 1; }
+  docker images
+  pause
+}
+
+generate_docker_export_command() {
+  print_header
+  bold "Generate Image Export Command"
+  local image safe
+  read -rp 'Image name (example: nginx:latest): ' image
+  if [[ -z "$image" ]]; then
+    err "Image name is required."
+    pause; return 1
+  fi
+  safe="$(printf '%s' "$image" | tr '/:' '__')"
+  printf '\nRun these commands on a machine that has normal internet access:\n\n'
+  printf 'docker pull %q\n' "$image"
+  printf 'docker save -o %q.tar %q\n' "$safe" "$image"
+  printf '\nThen upload %s.tar to this server and use: Docker Tools > Load Docker Image from File\n' "$safe"
+  pause
+}
+
+remove_docker_access_config_menu() {
+  print_header
+  bold "Remove Docker Access Config"
+  restore_docker_baseline
+  ok "Docker access config removed/restored."
+  pause
+}
+
+docker_tools_menu() {
+  while true; do
+    print_header
+    bold "Docker Tools"
+    cat <<'EOF_MENU'
+1) Install Docker
+2) Check Docker Access
+3) Pull Docker Image
+4) Load Docker Image from File
+5) List Docker Images
+6) Generate Image Export Command
+7) Remove Docker Access Config
+0) Back
+EOF_MENU
+    printf '\nChoose: '
+    read -r choice
+    case "$choice" in
+      1) install_docker ;;
+      2) check_docker_access ;;
+      3) pull_docker_image ;;
+      4) load_docker_image ;;
+      5) list_docker_images ;;
+      6) generate_docker_export_command ;;
+      7) remove_docker_access_config_menu ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; pause ;;
+    esac
+  done
+}
+
+# -----------------------------------------------------------------------------
+# Settings / enable / disable
+# -----------------------------------------------------------------------------
+
+show_status() {
+  print_header
+  bold "Current Status"
+  load_config
+  printf 'Access:               %s\n' "$( [[ "${NBI_ENABLED:-0}" == "1" ]] && printf 'Enabled' || printf 'Disabled' )"
+  printf 'Proxy:                %s\n' "$(masked_proxy)"
+  printf 'Access engine:        %s\n' "$( engine_installed && printf 'Ready' || printf 'Not prepared' )"
+  printf 'Docker:               %s\n' "$( docker_installed && printf 'Installed' || printf 'Not installed' )"
+  printf 'Docker access config: %s\n' "$( [[ "${NBI_DOCKER_ACCESS_CONFIGURED:-0}" == "1" ]] && printf 'Enabled' || printf 'Not enabled' )"
+  printf 'Auto restore:         %s\n' "$( [[ "${NBI_AUTO_RESTORE_ON_DISABLE:-1}" == "1" ]] && printf 'Yes' || printf 'No' )"
+  printf 'Config file:          %s\n' "$CONFIG_FILE"
+  printf 'Log file:             %s\n' "$LOG_FILE"
+  pause
+}
+
+enable_access() {
+  load_config
+  if ! has_access_config; then
+    configure_access
+    return $?
+  fi
+  NBI_ENABLED=1
+  save_config
+  bootstrap_install_engine && write_engine_config
+  ok "$APP_NAME enabled."
+  pause
+}
+
+disable_access() {
+  print_header
+  bold "Disable NimBridgeIR"
+  load_config
+  NBI_ENABLED=0
+  save_config
+
+  local do_restore
+  do_restore="${NBI_AUTO_RESTORE_ON_DISABLE:-1}"
+  if [[ "$do_restore" == "1" ]]; then
+    read -rp 'Restore related system/Docker access config now? [Y/n]: ' answer
+    case "${answer:-Y}" in
+      y|Y|yes|YES) do_restore=1 ;;
+      *) do_restore=0 ;;
+    esac
+  fi
+
+  if [[ "$do_restore" == "1" ]]; then
+    restore_latest_interrupted_session || true
+    restore_docker_baseline || true
+    cleanup_temp_access_files
+    ok "$APP_NAME disabled and previous configs restored."
+  else
+    ok "$APP_NAME disabled. Existing configs were kept."
+  fi
+  pause
+}
+
+toggle_restore_behavior() {
+  print_header
+  bold "Restore Behavior"
+  load_config
+  printf 'Current auto restore on disable: %s\n\n' "$( [[ "${NBI_AUTO_RESTORE_ON_DISABLE:-1}" == "1" ]] && printf 'Yes' || printf 'No' )"
+  read -rp 'Enable auto restore on disable? [Y/n]: ' ans
+  case "${ans:-Y}" in
+    y|Y|yes|YES) NBI_AUTO_RESTORE_ON_DISABLE=1 ;;
+    *) NBI_AUTO_RESTORE_ON_DISABLE=0 ;;
+  esac
+  save_config
+  ok "Restore behavior updated."
+  pause
+}
+
+reset_settings() {
+  print_header
+  bold "Reset NimBridgeIR Settings"
+  read -rp 'This will remove saved proxy settings. Continue? [y/N]: ' ans
+  case "$ans" in
+    y|Y|yes|YES)
+      rm -f "$CONFIG_FILE" "$ENGINE_CONF"
+      create_default_config
+      ok "Settings reset."
+      ;;
+    *) warn "Canceled." ;;
+  esac
+  pause
+}
+
+uninstall_menu() {
+  print_header
+  bold "Uninstall NimBridgeIR"
+  read -rp 'Uninstall NimBridgeIR from this server? [y/N]: ' ans
+  case "$ans" in
+    y|Y|yes|YES)
+      if [[ -x "$UNINSTALLER" ]]; then
+        bash "$UNINSTALLER"
+      else
+        warn "Uninstaller not found. Removing installed command only."
+        rm -f /usr/local/bin/nimbridgeir /usr/local/bin/nbi
+      fi
+      ;;
+    *) warn "Canceled."; pause ;;
+  esac
+}
+
+settings_menu() {
+  while true; do
+    print_header
+    bold "Settings"
+    cat <<'EOF_MENU'
+1) Show Current Status
+2) Reconfigure Access
+3) Enable NimBridgeIR
+4) Disable NimBridgeIR
+5) Restore Behavior
+6) Reset NimBridgeIR Settings
+7) Uninstall NimBridgeIR
+0) Back
+EOF_MENU
+    printf '\nChoose: '
+    read -r choice
+    case "$choice" in
+      1) show_status ;;
+      2) configure_access ;;
+      3) enable_access ;;
+      4) disable_access ;;
+      5) toggle_restore_behavior ;;
+      6) reset_settings ;;
+      7) uninstall_menu ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; pause ;;
+    esac
+  done
+}
+
+main_menu() {
+  require_root
+  ensure_dirs
+  load_config
+
+  while true; do
+    print_header
+    cat <<'EOF_MENU'
+1) Configure Access
+2) Check Connection
+3) Update Ubuntu Packages
+4) Install Ubuntu Package
+5) Download File
+6) Clone GitHub Repository
+7) Docker Tools
+8) Run Custom Command
+9) Settings
+0) Exit
+EOF_MENU
+    printf '\nChoose: '
+    read -r choice
+    case "$choice" in
+      1) configure_access ;;
+      2) check_connection_menu ;;
+      3) update_ubuntu_packages ;;
+      4) install_ubuntu_package ;;
+      5) download_file ;;
+      6) clone_github_repo ;;
+      7) docker_tools_menu ;;
+      8) run_custom_command ;;
+      9) settings_menu ;;
+      0) exit 0 ;;
+      *) warn "Invalid option."; pause ;;
+    esac
+  done
+}
+
+usage() {
+  cat <<EOF_USAGE
+$APP_NAME $NBI_VERSION
+
+Usage:
+  $APP_CMD                 Open interactive menu
+  $APP_CMD --check         Check connection using saved config
+  $APP_CMD --enable        Enable saved access config
+  $APP_CMD --disable       Disable access config
+  $APP_CMD --status        Show status
+  $APP_CMD --version       Show version
+EOF_USAGE
+}
+
+main() {
+  case "${1:-}" in
+    --help|-h) usage ;;
+    --version|-v) printf '%s %s\n' "$APP_NAME" "$NBI_VERSION" ;;
+    --check) require_root; load_config; check_connection_compact ;;
+    --enable) require_root; enable_access ;;
+    --disable) require_root; disable_access ;;
+    --status) require_root; show_status ;;
+    *) main_menu ;;
+  esac
+}
+
+main "$@"
