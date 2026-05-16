@@ -1,33 +1,9 @@
 # Changelog
 
-## v0.1.3
-
-- ساده‌سازی منوی اصلی
-- حذف گزینه‌های اضافی از منوی اصلی
-- ساده‌سازی منوی Docker Tools
-- اضافه شدن گزینه هوشمند Enable/Disable Docker Access
-- تبدیل Enable/Disable NimBridgeIR به یک گزینه هوشمند در Settings
-- اجرای تنظیمات اولیه proxy در اولین اجرای برنامه
-- بهبود حذف برنامه و پاک‌سازی کامل تنظیمات
-- بازنویسی README به زبان فارسی ساده
-
-## v0.1.2
-
-- بهبود تنظیم Docker access از طریق systemd
-- رفع مشکل Docker pull روی بعضی سرورها
-
-## v0.1.1
-
-- اجرای دستورات apt و دانلود از مسیر داخلی برنامه
-- حذف تنظیم proxy مستقیم برای APT
-
-## v0.1.0
-
-- نسخه اولیه
-- منوی تعاملی
-- تنظیم HTTP proxy
-- بررسی اتصال
-- آپدیت و نصب پکیج‌های Ubuntu
-- ابزار دانلود فایل
-- ابزارهای Docker
-- تنظیمات فعال/غیرفعال و restore
+## v1.0.0
+- First public release
+- Simple access configuration with HTTP Proxy
+- Ubuntu package update and installation support
+- File download support
+- Docker installation and image pull support
+- Simple settings and uninstall flow
