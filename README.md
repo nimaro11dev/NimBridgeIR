@@ -19,7 +19,7 @@
 ```text
 USDT TRC20: TZEkPk6pmxRPFsAXWe7jSqfmwFeEYcxRYq
 USDT BEP20: 0x66F98e2980906503f0B4a5E9d14A5BfD7d2aB008
-TON: UQDN_FNnzZHr7qks6XRV1k9JKHFfPZ2frq_oymluJksa2MRe
+TON       : UQDN_FNnzZHr7qks6XRV1k9JKHFfPZ2frq_oymluJksa2MRe
 ```
 
 <p dir="rtl" align="right">
