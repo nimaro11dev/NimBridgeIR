@@ -1,9 +1,15 @@
 # Changelog
 
 ## v1.0.0
-- First public release
-- Simple access configuration with HTTP Proxy
-- Ubuntu package update and installation support
-- File download support
-- Docker installation and image pull support
-- Simple settings and uninstall flow
+
+- انتشار اولین نسخه عمومی NimBridgeIR
+- تنظیم ساده دسترسی با HTTP Proxy
+- بررسی اتصال به منابع مهم
+- آپدیت لیست پکیج‌های Ubuntu
+- نصب پکیج‌های Ubuntu
+- دانلود فایل از لینک مستقیم
+- نصب و آماده‌سازی Docker
+- تست دسترسی Docker
+- Pull کردن Docker Image
+- تنظیمات فعال/غیرفعال برنامه
+- حذف برنامه و پاک‌سازی تنظیمات در صورت نیاز
