@@ -1,10 +1,59 @@
+<div dir="rtl" align="right">
+
 # NimBridgeIR
 
 **NimBridgeIR** یک ابزار ساده برای سرورهای Ubuntu داخل ایران است.
 
-با این ابزار می‌توانید کارهای اولیه و پرکاربرد سرور را راحت‌تر انجام دهید؛ مثل آپدیت Ubuntu، نصب پکیج‌ها، دانلود فایل، نصب Docker و Pull کردن Docker Imageها.
+با NimBridgeIR می‌توانید کارهای اولیه و پرکاربرد سرور را راحت‌تر انجام دهید؛ مثل آپدیت Ubuntu، نصب پکیج‌ها، دانلود فایل، نصب Docker و Pull کردن Docker Imageها.
 
 ساخته‌شده توسط **nimaro11 dev**
+
+---
+
+## ❤️ حمایت از پروژه
+
+اگر این ابزار برای شما مفید بود و دوست داشتید از ادامه توسعه آن حمایت کنید، می‌توانید از طریق آدرس‌های زیر دونیت کنید:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```text
+USDT TRC20: TZEkPk6pmxRPFsAXWe7jSqfmwFeEYcxRYq
+USDT BEP20: 0x66F98e2980906503f0B4a5E9d14A5BfD7d2aB008
+TON: UQDN_FNnzZHr7qks6XRV1k9JKHFfPZ2frq_oymluJksa2MRe
+```
+
+</div>
+
+<div dir="rtl" align="right">
+
+---
+
+## قبل از استفاده چه چیزی لازم است؟
+
+برای استفاده از NimBridgeIR باید یک **HTTP Proxy** داشته باشید.
+
+در اولین اجرای برنامه، اطلاعات proxy از شما پرسیده می‌شود:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```text
+Proxy host/IP
+Proxy port
+Username (optional)
+Password (optional)
+```
+
+</div>
+
+<div dir="rtl" align="right">
+
+اگر proxy شما username و password ندارد، قسمت username را خالی بگذارید.
+
+بعد از ثبت proxy، برنامه از همین تنظیمات برای انجام کارهایی مثل آپدیت، نصب پکیج، دانلود فایل و کار با Docker استفاده می‌کند. کاربر لازم نیست درگیر تنظیمات پیچیده سیستم شود.
 
 ---
 
@@ -12,20 +61,18 @@
 
 بعضی سرورهای داخل ایران برای دسترسی به منابع خارجی مثل Ubuntu Repository، Docker Hub، GitHub و بعضی لینک‌های دانلود مشکل دارند.
 
-NimBridgeIR این کارها را ساده می‌کند:
+NimBridgeIR این کارها را ساده‌تر می‌کند:
 
-- گرفتن تنظیمات دسترسی فقط یک‌بار از کاربر
+- دریافت اطلاعات دسترسی فقط یک‌بار از کاربر
 - تست اتصال به منابع مهم
 - آپدیت لیست پکیج‌های Ubuntu
 - نصب پکیج‌های Ubuntu
 - دانلود فایل از لینک مستقیم
 - نصب Docker
-- تنظیم دسترسی Docker
+- آماده‌سازی Docker برای دریافت image
 - Pull کردن Docker Image
-- فعال یا غیرفعال کردن تنظیمات NimBridgeIR
+- فعال یا غیرفعال کردن تنظیمات برنامه
 - حذف کامل برنامه در صورت نیاز
-
-کاربر لازم نیست درگیر تنظیمات پیچیده سیستم شود. کافی است برنامه را اجرا کند و از منوی ساده استفاده کند.
 
 ---
 
@@ -43,17 +90,73 @@ NimBridgeIR این کارها را ساده می‌کند:
 
 ## نصب برنامه
 
-### روش پیشنهادی: آپلود دستی روی سرور
+### روش اول: نصب با لینک مستقیم
+
+اگر سرور به GitHub دسترسی دارد، از این دستور استفاده کنید:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nimaro11dev/NimBridgeIR/main/install.sh | sudo bash
+```
+
+</div>
+
+<div dir="rtl" align="right">
+
+بعد از نصب، برنامه را اجرا کنید:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+sudo nimbridgeir
+```
+
+</div>
+
+<div dir="rtl" align="right">
+
+یا از دستور کوتاه‌تر استفاده کنید:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```bash
+sudo nbi
+```
+
+</div>
+
+<div dir="rtl" align="right">
+
+### روش دوم: آپلود دستی روی سرور
 
 اگر سرور هنوز دسترسی مناسب برای دانلود از اینترنت ندارد، فایل‌های پروژه را از سیستم خودتان روی سرور آپلود کنید.
 
 روی سیستم خودتان:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```bash
 scp -r NimBridgeIR root@SERVER_IP:/root/
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 روی سرور:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```bash
 cd /root/NimBridgeIR
@@ -61,21 +164,9 @@ sudo bash install.sh
 sudo nimbridgeir
 ```
 
-بعد از نصب، می‌توانید از دستور کوتاه‌تر هم استفاده کنید:
+</div>
 
-```bash
-sudo nbi
-```
-
-### نصب با لینک مستقیم
-
-بعد از قرار گرفتن پروژه روی GitHub، اگر سرور به GitHub دسترسی داشت، می‌توانید از این روش استفاده کنید:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/nimaro11/NimBridgeIR/main/install.sh | sudo bash
-```
-
-اگر سرور به GitHub دسترسی ندارد، همان روش آپلود دستی بهتر است.
+<div dir="rtl" align="right">
 
 ---
 
@@ -83,26 +174,41 @@ curl -fsSL https://raw.githubusercontent.com/nimaro11/NimBridgeIR/main/install.s
 
 بعد از اولین اجرا:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```bash
 sudo nimbridgeir
 ```
 
-اگر هنوز تنظیمات دسترسی ثبت نشده باشد، برنامه همان ابتدا اطلاعات proxy را از شما می‌پرسد:
+</div>
+
+<div dir="rtl" align="right">
+
+اگر تنظیمات دسترسی هنوز ثبت نشده باشد، برنامه همان ابتدا اطلاعات proxy را از شما می‌پرسد.
+
+بعداً هر زمان خواستید، می‌توانید از مسیر زیر proxy را تغییر دهید:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
-Proxy host/IP
-Proxy port
-Username اختیاری
-Password اختیاری
+Settings > Reconfigure Access
 ```
 
-اگر proxy شما username/password ندارد، قسمت username را خالی بگذارید.
+</div>
 
-بعداً هر زمان خواستید، می‌توانید از بخش Settings اطلاعات را دوباره وارد کنید.
+<div dir="rtl" align="right">
 
 ---
 
 ## منوی اصلی
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 1) Check Connection
@@ -113,6 +219,10 @@ Password اختیاری
 6) Settings
 0) Exit
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 1) Check Connection
 
@@ -127,29 +237,41 @@ Password اختیاری
 
 ### 2) Update Ubuntu Packages
 
-معادل ساده‌شده دستور زیر است:
+برای به‌روزرسانی لیست پکیج‌های Ubuntu استفاده می‌شود.
+
+معادل ساده‌شده این دستور است:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```bash
 apt update
 ```
 
-از این گزینه برای به‌روزرسانی لیست پکیج‌های Ubuntu استفاده کنید.
+</div>
+
+<div dir="rtl" align="right">
 
 ### 3) Install Ubuntu Package
 
 با این گزینه می‌توانید یک پکیج Ubuntu نصب کنید.
 
-مثلاً اگر برنامه از شما نام پکیج خواست، می‌توانید وارد کنید:
+مثال:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 curl
-```
-
-یا:
-
-```text
 nginx
+unzip
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 4) Docker Tools
 
@@ -161,25 +283,45 @@ nginx
 
 برنامه از شما دو چیز می‌پرسد:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 File URL
 Save as
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 مثال:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 File URL: https://example.com/file.tar.gz
 Save as: /root/file.tar.gz
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 ### 6) Settings
 
-برای تغییر تنظیمات ذخیره‌شده، فعال/غیرفعال کردن برنامه و حذف برنامه استفاده می‌شود.
+برای تغییر تنظیمات ذخیره‌شده، فعال یا غیرفعال کردن برنامه و حذف برنامه استفاده می‌شود.
 
 ---
 
 ## منوی Docker Tools
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 1) Install Docker
@@ -188,6 +330,10 @@ Save as: /root/file.tar.gz
 4) Enable/Disable Docker Access
 0) Back
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 1) Install Docker
 
@@ -199,7 +345,19 @@ Docker و ابزارهای لازم آن را نصب می‌کند.
 
 بررسی می‌کند Docker بتواند از Docker Hub ایمیج بگیرد یا نه.
 
-این گزینه برای تست از image سبک `hello-world:latest` استفاده می‌کند.
+این گزینه برای تست از image سبک زیر استفاده می‌کند:
+
+</div>
+
+<div dir="ltr" align="left">
+
+```text
+hello-world:latest
+```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 3) Pull Docker Image
 
@@ -207,21 +365,19 @@ Docker و ابزارهای لازم آن را نصب می‌کند.
 
 مثال:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 nginx:latest
-```
-
-یا:
-
-```text
 postgres:17.6
-```
-
-یا:
-
-```text
 remnawave/backend:2
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 4) Enable/Disable Docker Access
 
@@ -229,21 +385,41 @@ remnawave/backend:2
 
 اگر Docker access فعال باشد، متن گزینه به شکل زیر نمایش داده می‌شود:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Disable Docker Access
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 اگر غیرفعال باشد، متن گزینه به شکل زیر نمایش داده می‌شود:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 Enable Docker Access
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 این گزینه Docker را حذف نمی‌کند. فقط تنظیمات دسترسی Docker را فعال یا غیرفعال می‌کند.
 
 ---
 
 ## منوی Settings
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 1) Show Current Status
@@ -254,6 +430,10 @@ Enable Docker Access
 6) Uninstall NimBridgeIR
 0) Back
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 1) Show Current Status
 
@@ -276,15 +456,31 @@ Enable Docker Access
 
 اگر NimBridgeIR فعال باشد، گزینه به شکل زیر نمایش داده می‌شود:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Disable NimBridgeIR
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 اگر غیرفعال باشد، گزینه به شکل زیر نمایش داده می‌شود:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 Enable NimBridgeIR
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 با Disable کردن، برنامه حذف نمی‌شود؛ فقط تنظیمات فعال آن غیرفعال می‌شود.
 
@@ -294,9 +490,17 @@ Enable NimBridgeIR
 
 پیشنهاد معمول:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Yes
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ### 5) Reset Saved Proxy Settings
 
@@ -321,79 +525,74 @@ Yes
 
 دستور اصلی:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 /usr/local/bin/nimbridgeir
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 دستور کوتاه:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 /usr/local/bin/nbi
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 تنظیمات برنامه:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 /etc/nimbridgeir/config.env
 /etc/nimbridgeir/engine.conf
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 فایل‌های وضعیت و بکاپ:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 /var/lib/nimbridgeir/
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 لاگ برنامه:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```text
 /var/log/nimbridgeir.log
 ```
 
----
+</div>
 
-## تنظیمات مهم قبل از انتشار یا استفاده نهایی
-
-داخل فایل `nimbridgeir`، ابتدای فایل این بخش را بررسی کنید:
-
-```bash
-# Release defaults
-```
-
-### DNS مرحله آماده‌سازی
-
-```bash
-NBI_BOOTSTRAP_DNS_1="${NBI_BOOTSTRAP_DNS_1:-217.218.127.127}"
-NBI_BOOTSTRAP_DNS_2="${NBI_BOOTSTRAP_DNS_2:-217.218.155.155}"
-```
-
-این DNSها فقط برای آماده‌سازی اولیه استفاده می‌شوند.
-
-اگر DNS بهتر و پایدارتر دارید، این دو مقدار را تغییر دهید.
-
-### mirror مرحله آماده‌سازی
-
-```bash
-NBI_BOOTSTRAP_APT_MIRROR="${NBI_BOOTSTRAP_APT_MIRROR:-http://ubuntu.parsvds.com/ubuntu}"
-NBI_BOOTSTRAP_SECURITY_MIRROR="${NBI_BOOTSTRAP_SECURITY_MIRROR:-http://ubuntu.parsvds.com/ubuntu}"
-```
-
-این mirror فقط برای آماده‌سازی اولیه استفاده می‌شود.
-
-بعد از آماده‌سازی، تنظیمات قبلی APT برگردانده می‌شود.
-
-قبل از استفاده جدی، این mirror را روی یک Ubuntu خام داخل ایران تست کنید.
-
-### آدرس‌های تست اتصال
-
-```bash
-NBI_TEST_URL_GENERAL="${NBI_TEST_URL_GENERAL:-https://example.com}"
-NBI_TEST_URL_GITHUB="${NBI_TEST_URL_GITHUB:-https://github.com}"
-NBI_TEST_URL_UBUNTU="${NBI_TEST_URL_UBUNTU:-https://archive.ubuntu.com/ubuntu/}"
-NBI_TEST_URL_DOCKER="${NBI_TEST_URL_DOCKER:-https://registry-1.docker.io/v2/}"
-```
-
-این آدرس‌ها برای گزینه `Check Connection` استفاده می‌شوند.
+<div dir="rtl" align="right">
 
 ---
 
@@ -401,21 +600,45 @@ NBI_TEST_URL_DOCKER="${NBI_TEST_URL_DOCKER:-https://registry-1.docker.io/v2/}"
 
 اگر خواستید برنامه را دستی حذف کنید:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```bash
 sudo bash /usr/local/lib/nimbridgeir/uninstall.sh
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 حذف کامل همراه با تنظیمات، لاگ‌ها و بکاپ‌ها:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```bash
 sudo bash /usr/local/lib/nimbridgeir/uninstall.sh --purge
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 حذف بدون برگرداندن تنظیمات Docker/system:
+
+</div>
+
+<div dir="ltr" align="left">
 
 ```bash
 sudo bash /usr/local/lib/nimbridgeir/uninstall.sh --no-restore
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 ---
 
@@ -425,9 +648,17 @@ sudo bash /usr/local/lib/nimbridgeir/uninstall.sh --no-restore
 
 اول این گزینه را تست کنید:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Docker Tools > Check Docker Access
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 اگر باز هم خطا گرفتید، proxy را از بخش Settings دوباره وارد کنید یا proxy دیگری تست کنید.
 
@@ -435,9 +666,17 @@ Docker Tools > Check Docker Access
 
 از منوی اصلی این گزینه را تست کنید:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Check Connection
 ```
+
+</div>
+
+<div dir="rtl" align="right">
 
 اگر Ubuntu packages یا General HTTPS خطا داشت، معمولاً مشکل از proxy یا اتصال سرور است.
 
@@ -445,19 +684,22 @@ Check Connection
 
 از این مسیر دوباره اطلاعات را وارد کنید:
 
+</div>
+
+<div dir="ltr" align="left">
+
 ```text
 Settings > Reconfigure Access
 ```
 
+</div>
+
+<div dir="rtl" align="right">
+
 ---
 
-## حمایت مالی
+## نکته مهم
 
-اگر این ابزار برای شما مفید بود، می‌توانید از پروژه حمایت کنید.
+NimBridgeIR برای کار کردن به یک HTTP Proxy نیاز دارد. اگر proxy قطع باشد، کند باشد یا به Docker Hub و GitHub دسترسی مناسب نداشته باشد، بعضی گزینه‌ها ممکن است با خطا روبه‌رو شوند.
 
-```text
-USDT TRC20: TZEkPk6pmxRPFsAXWe7jSqfmwFeEYcxRYq
-USDT BEP20: 0x66F98e2980906503f0B4a5E9d14A5BfD7d2aB008
-TON: UQDN_FNnzZHr7qks6XRV1k9JKHFfPZ2frq_oymluJksa2MRe
-```
-
+</div>
