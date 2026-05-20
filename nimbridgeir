@@ -4,7 +4,7 @@
 
 set -uo pipefail
 
-NBI_VERSION="1.0.0"
+NBI_VERSION="1.1.0"
 APP_NAME="NimBridgeIR"
 APP_CMD="nimbridgeir"
 
@@ -26,6 +26,9 @@ NBI_TEST_URL_GENERAL="${NBI_TEST_URL_GENERAL:-https://example.com}"
 NBI_TEST_URL_GITHUB="${NBI_TEST_URL_GITHUB:-https://github.com}"
 NBI_TEST_URL_UBUNTU="${NBI_TEST_URL_UBUNTU:-https://archive.ubuntu.com/ubuntu/}"
 NBI_TEST_URL_DOCKER="${NBI_TEST_URL_DOCKER:-https://registry-1.docker.io/v2/}"
+NBI_3XUI_RELEASES_API="${NBI_3XUI_RELEASES_API:-https://api.github.com/repos/MHSanaei/3x-ui/releases}"
+NBI_3XUI_INSTALLER_URL="${NBI_3XUI_INSTALLER_URL:-https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh}"
+ 
 
 NBI_DEFAULT_NO_PROXY="${NBI_DEFAULT_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
 
@@ -35,11 +38,18 @@ NBI_DEFAULT_NO_PROXY="${NBI_DEFAULT_NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8
 CONFIG_DIR="/etc/nimbridgeir"
 CONFIG_FILE="$CONFIG_DIR/config.env"
 ENGINE_CONF="$CONFIG_DIR/engine.conf"
+SING_BOX_CONF="$CONFIG_DIR/sing-box.json"
+BRIDGE_STATE_DIR="/run/nimbridgeir"
 STATE_DIR="/var/lib/nimbridgeir"
 BACKUP_DIR="$STATE_DIR/backups"
 BASELINE_DIR="$STATE_DIR/baseline"
 LOG_FILE="/var/log/nimbridgeir.log"
 DOCKER_SYSTEMD_PROXY_CONF="/etc/systemd/system/docker.service.d/nimbridgeir-access.conf"
+NBI_BRIDGE_SERVICE="nimbridgeir-bridge.service"
+NBI_BRIDGE_SYSTEMD_SERVICE="/etc/systemd/system/$NBI_BRIDGE_SERVICE"
+NBI_BRIDGE_LISTEN="127.0.0.1"
+NBI_BRIDGE_PORT_MIN=18000
+NBI_BRIDGE_PORT_MAX=28999
 UNINSTALLER="/usr/local/lib/nimbridgeir/uninstall.sh"
 
 # -----------------------------------------------------------------------------
@@ -70,8 +80,8 @@ require_root() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR"
-  chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR" 2>/dev/null || true
+ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR" "$BRIDGE_STATE_DIR"
+ chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR" "$BASELINE_DIR" "$BRIDGE_STATE_DIR" 2>/dev/null || true
 }
 
 print_header() {
@@ -105,10 +115,13 @@ create_default_config() {
   [[ -f "$CONFIG_FILE" ]] && return 0
   cat > "$CONFIG_FILE" <<EOF_CONFIG
 NBI_ENABLED=0
+NBI_PROXY_TYPE=http
+NBI_PROXY_RAW=
 NBI_PROXY_HOST=
 NBI_PROXY_PORT=
 NBI_PROXY_USER=
 NBI_PROXY_PASS=
+NBI_BRIDGE_PORT=
 NBI_AUTO_RESTORE_ON_DISABLE=1
 NBI_DOCKER_ACCESS_CONFIGURED=0
 NBI_NO_PROXY=$(q "$NBI_DEFAULT_NO_PROXY")
@@ -128,10 +141,13 @@ save_config() {
   tmp="$(mktemp)"
   {
     printf 'NBI_ENABLED=%q\n' "${NBI_ENABLED:-0}"
+    printf 'NBI_PROXY_TYPE=%q\n' "${NBI_PROXY_TYPE:-http}"
+    printf 'NBI_PROXY_RAW=%q\n' "${NBI_PROXY_RAW:-}"
     printf 'NBI_PROXY_HOST=%q\n' "${NBI_PROXY_HOST:-}"
     printf 'NBI_PROXY_PORT=%q\n' "${NBI_PROXY_PORT:-}"
     printf 'NBI_PROXY_USER=%q\n' "${NBI_PROXY_USER:-}"
     printf 'NBI_PROXY_PASS=%q\n' "${NBI_PROXY_PASS:-}"
+    printf 'NBI_BRIDGE_PORT=%q\n' "${NBI_BRIDGE_PORT:-}"
     printf 'NBI_AUTO_RESTORE_ON_DISABLE=%q\n' "${NBI_AUTO_RESTORE_ON_DISABLE:-1}"
     printf 'NBI_DOCKER_ACCESS_CONFIGURED=%q\n' "${NBI_DOCKER_ACCESS_CONFIGURED:-0}"
     printf 'NBI_NO_PROXY=%q\n' "${NBI_NO_PROXY:-$NBI_DEFAULT_NO_PROXY}"
@@ -141,11 +157,22 @@ save_config() {
 }
 
 has_access_config() {
-  [[ -n "${NBI_PROXY_HOST:-}" && -n "${NBI_PROXY_PORT:-}" ]]
+  [[ -n "${NBI_PROXY_RAW:-}" || ( -n "${NBI_PROXY_HOST:-}" && -n "${NBI_PROXY_PORT:-}" ) ]]
 }
 
 validate_port() {
   [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -ge 1 && "$1" -le 65535 ]]
+}
+
+trim() {
+ local value="$1"
+ value="${value#"${value%%[![:space:]]*}"}"
+ value="${value%"${value##*[![:space:]]}"}"
+ printf '%s' "$value"
+}
+
+bridge_needed() {
+ [[ "${NBI_PROXY_TYPE:-http}" != "http" ]]
 }
 
 urlencode() {
@@ -161,6 +188,11 @@ urlencode() {
 }
 
 proxy_url() {
+ if bridge_needed; then
+  printf 'http://%s:%s' "$NBI_BRIDGE_LISTEN" "${NBI_BRIDGE_PORT:-}"
+  return 0
+ fi
+
   local host="${NBI_PROXY_HOST:-}" port="${NBI_PROXY_PORT:-}"
   local user="${NBI_PROXY_USER:-}" pass="${NBI_PROXY_PASS:-}"
   if [[ -n "$user" ]]; then
@@ -181,11 +213,605 @@ systemd_env_escape() {
 masked_proxy() {
   if [[ -z "${NBI_PROXY_HOST:-}" ]]; then
     printf 'not configured'
+  elif bridge_needed; then
+    printf '%s://%s:%s -> http://%s:%s' "${NBI_PROXY_TYPE:-proxy}" "${NBI_PROXY_HOST}" "${NBI_PROXY_PORT}" "$NBI_BRIDGE_LISTEN" "${NBI_BRIDGE_PORT:-not-ready}"
   elif [[ -n "${NBI_PROXY_USER:-}" ]]; then
     printf 'http://%s:***@%s:%s' "${NBI_PROXY_USER}" "${NBI_PROXY_HOST}" "${NBI_PROXY_PORT}"
   else
     printf 'http://%s:%s' "${NBI_PROXY_HOST}" "${NBI_PROXY_PORT}"
   fi
+}
+
+parse_access_input() {
+ local raw="$1"
+ raw="$(trim "$raw")"
+
+ if [[ -z "$raw" ]]; then
+  err "Proxy/config cannot be empty."
+  return 1
+ fi
+
+ if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 is required to parse proxy configs."
+  return 1
+ fi
+
+ local parsed rc
+ parsed="$(python3 - "$raw" <<'PY'
+import base64
+import json
+import sys
+from urllib.parse import parse_qs, unquote, urlparse
+
+raw = sys.argv[1].strip()
+
+def fail(message):
+    print("ERROR=" + json.dumps(message))
+    sys.exit(2)
+
+def emit(data):
+    for key, value in data.items():
+        if value is None:
+            value = ""
+        print(f"{key}={json.dumps(str(value))}")
+
+def b64decode_padded(value):
+    value = value.strip()
+    value += "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value.encode()).decode()
+
+def safe_port(u, message):
+    try:
+        port = u.port
+    except ValueError:
+        fail(message)
+    if port is None or port < 1 or port > 65535:
+        fail(message)
+    return port
+
+u = urlparse(raw)
+scheme = (u.scheme or "").lower()
+
+if scheme == "http":
+    port = safe_port(u, "HTTP proxy must be like http://host:port")
+    if not u.hostname:
+        fail("HTTP proxy must be like http://host:port")
+    emit({
+        "TYPE": "http",
+        "RAW": raw,
+        "HOST": u.hostname,
+        "PORT": port,
+        "USER": unquote(u.username or ""),
+        "PASS": unquote(u.password or ""),
+    })
+    sys.exit(0)
+
+if scheme in ("socks", "socks5", "socks4", "socks4a"):
+    port = safe_port(u, "SOCKS proxy must be like socks5://host:port")
+    if not u.hostname:
+        fail("SOCKS proxy must be like socks5://host:port")
+    proxy_type = "socks5" if scheme in ("socks", "socks5") else scheme
+    emit({
+        "TYPE": proxy_type,
+        "RAW": raw,
+        "HOST": u.hostname,
+        "PORT": port,
+        "USER": unquote(u.username or ""),
+        "PASS": unquote(u.password or ""),
+    })
+    sys.exit(0)
+
+if scheme == "vless":
+    if not u.username or not u.hostname:
+        fail("Invalid VLESS link.")
+    query = parse_qs(u.query)
+    security = (query.get("security", [""])[0] or "").lower()
+    default_port = 443 if security in ("tls", "reality") else 80
+    try:
+        port = u.port or default_port
+    except ValueError:
+        fail("Invalid VLESS link.")
+    emit({
+        "TYPE": "vless",
+        "RAW": raw,
+        "HOST": u.hostname,
+        "PORT": port,
+        "USER": "",
+        "PASS": "",
+    })
+    sys.exit(0)
+
+if scheme == "vmess":
+    payload = raw[len("vmess://"):]
+    try:
+        obj = json.loads(b64decode_padded(payload))
+        port = int(obj.get("port"))
+    except Exception:
+        fail("Invalid VMess link.")
+    host = obj.get("add") or obj.get("host")
+    if not host or not obj.get("id") or port < 1 or port > 65535:
+        fail("Invalid VMess link.")
+    emit({
+        "TYPE": "vmess",
+        "RAW": raw,
+        "HOST": host,
+        "PORT": port,
+        "USER": "",
+        "PASS": "",
+    })
+    sys.exit(0)
+
+fail("Supported inputs: http://, socks5://, socks4://, vless://, vmess://")
+PY
+)"
+
+rc=$?
+
+ if [[ $rc -ne 0 || "$parsed" == ERROR=* ]]; then
+  local message="Proxy/config parse failed."
+  if [[ "$parsed" == ERROR=* ]]; then
+   message="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]))' "${parsed#ERROR=}" 2>/dev/null || printf '%s' "$message")"
+  fi
+  err "$message"
+  return 1
+ fi
+
+ local line key value
+ while IFS= read -r line; do
+  [[ -n "$line" ]] || continue
+  key="${line%%=*}"
+  value="${line#*=}"
+  value="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]))' "$value")" || return 1
+  case "$key" in
+   TYPE) NBI_PROXY_TYPE="$value" ;;
+   RAW) NBI_PROXY_RAW="$value" ;;
+   HOST) NBI_PROXY_HOST="$value" ;;
+   PORT) NBI_PROXY_PORT="$value" ;;
+   USER) NBI_PROXY_USER="$value" ;;
+   PASS) NBI_PROXY_PASS="$value" ;;
+  esac
+ done <<< "$parsed"
+}
+
+sing_box_bin() {
+ if [[ -x /usr/local/lib/nimbridgeir/sing-box ]]; then
+  printf '%s' "/usr/local/lib/nimbridgeir/sing-box"
+  return 0
+ fi
+
+ if command -v sing-box >/dev/null 2>&1; then
+  command -v sing-box
+  return 0
+ fi
+
+ return 1
+}
+
+bridge_port_free() {
+ local port="$1"
+ validate_port "$port" || return 1
+ python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("127.0.0.1", port))
+finally:
+    sock.close()
+PY
+}
+
+pick_bridge_port() {
+ if [[ -n "${NBI_BRIDGE_PORT:-}" ]] && { bridge_port_free "$NBI_BRIDGE_PORT" || bridge_port_active "$NBI_BRIDGE_PORT"; }; then
+  return 0
+ fi
+
+ local port
+ port="$(python3 - "$NBI_BRIDGE_PORT_MIN" "$NBI_BRIDGE_PORT_MAX" <<'PY'
+import random
+import socket
+import sys
+
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+ports = list(range(start, end + 1))
+random.shuffle(ports)
+
+for port in ports:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        continue
+    finally:
+        sock.close()
+    print(port)
+    sys.exit(0)
+
+sys.exit(1)
+PY
+)" || {
+  err "Could not find a free local bridge port."
+  return 1
+ }
+
+ NBI_BRIDGE_PORT="$port"
+ save_config
+}
+
+bridge_service_active() {
+ command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$NBI_BRIDGE_SERVICE" 2>/dev/null
+}
+
+bridge_port_active() {
+ local port="$1"
+ validate_port "$port" || return 1
+ bridge_service_active || return 1
+ ss -ltn 2>/dev/null | awk -v addr="$NBI_BRIDGE_LISTEN:$port" '$4 == addr { found=1 } END { exit !found }'
+}
+
+write_sing_box_config() {
+ bridge_needed || return 0
+
+ if [[ -z "${NBI_PROXY_RAW:-}" ]]; then
+  err "Proxy/config is not saved."
+  return 1
+ fi
+
+ if [[ -z "${NBI_BRIDGE_PORT:-}" ]]; then
+  err "Local bridge port is not selected."
+  return 1
+ fi
+
+ export NBI_PROXY_RAW NBI_PROXY_TYPE NBI_BRIDGE_PORT NBI_BRIDGE_LISTEN
+
+ if ! python3 - "$SING_BOX_CONF" <<'PY'
+import base64
+import json
+import os
+import sys
+from urllib.parse import parse_qs, unquote, urlparse
+
+path = sys.argv[1]
+raw = os.environ["NBI_PROXY_RAW"].strip()
+listen = os.environ.get("NBI_BRIDGE_LISTEN", "127.0.0.1")
+listen_port = int(os.environ["NBI_BRIDGE_PORT"])
+
+def fail(message):
+    raise SystemExit(message)
+
+def first(query, *keys, default=""):
+    for key in keys:
+        value = query.get(key)
+        if value and value[0] != "":
+            return value[0]
+    return default
+
+def b64decode_padded(value):
+    value = value.strip()
+    value += "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value.encode()).decode()
+
+def add_tls(outbound, server, query=None, enabled=True, server_name=""):
+    if not enabled:
+        return
+    query = query or {}
+    tls = {"enabled": True}
+    sni = server_name or first(query, "sni", "peer", "serverName", "servername", default=server)
+    if sni:
+        tls["server_name"] = sni
+    fingerprint = first(query, "fp", "fingerprint")
+    if fingerprint:
+        tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+    outbound["tls"] = tls
+
+def add_reality(outbound, server, query):
+    tls = {"enabled": True}
+    sni = first(query, "sni", "peer", "serverName", "servername", default=server)
+    if sni:
+        tls["server_name"] = sni
+    fingerprint = first(query, "fp", "fingerprint")
+    if fingerprint:
+        tls["utls"] = {"enabled": True, "fingerprint": fingerprint}
+    reality = {"enabled": True}
+    public_key = first(query, "pbk", "publicKey", "public_key")
+    short_id = first(query, "sid", "shortId", "short_id")
+    if not public_key:
+        fail("Reality VLESS requires pbk/publicKey.")
+    reality["public_key"] = public_key
+    if short_id:
+        reality["short_id"] = short_id
+    tls["reality"] = reality
+    outbound["tls"] = tls
+
+def add_transport(outbound, network, query, host_header="", path_value=""):
+    network = (network or "").lower()
+    if network in ("", "tcp", "raw"):
+        return
+
+    if network == "ws":
+        transport = {
+            "type": "ws",
+            "path": first(query, "path", default=path_value or "/"),
+        }
+        host = first(query, "host", "headers", default=host_header)
+        if host:
+            transport["headers"] = {"Host": host}
+        outbound["transport"] = transport
+        return
+
+    if network == "grpc":
+        service_name = first(query, "serviceName", "service_name", "path", default=path_value)
+        outbound["transport"] = {
+            "type": "grpc",
+            "service_name": service_name,
+        }
+        return
+
+    if network in ("http", "h2"):
+        host = first(query, "host", default=host_header)
+        transport = {
+            "type": "http",
+            "path": first(query, "path", default=path_value or "/"),
+        }
+        if host:
+            transport["host"] = [host]
+        outbound["transport"] = transport
+        return
+
+    fail(f"Unsupported transport: {network}")
+
+def http_outbound(u):
+    if not u.hostname or not u.port:
+        fail("HTTP proxy must be like http://host:port")
+    outbound = {
+        "type": "http",
+        "tag": "proxy-out",
+        "server": u.hostname,
+        "server_port": int(u.port),
+    }
+    if u.username:
+        outbound["username"] = unquote(u.username)
+        outbound["password"] = unquote(u.password or "")
+    return outbound
+
+def socks_outbound(u):
+    if not u.hostname or not u.port:
+        fail("SOCKS proxy must be like socks5://host:port")
+    scheme = (u.scheme or "socks5").lower()
+    version = "5"
+    if scheme == "socks4":
+        version = "4"
+    elif scheme == "socks4a":
+        version = "4a"
+    outbound = {
+        "type": "socks",
+        "tag": "proxy-out",
+        "server": u.hostname,
+        "server_port": int(u.port),
+        "version": version,
+    }
+    if u.username:
+        outbound["username"] = unquote(u.username)
+        outbound["password"] = unquote(u.password or "")
+    return outbound
+
+def vless_outbound(u):
+    if not u.username or not u.hostname:
+        fail("Invalid VLESS link.")
+    query = parse_qs(u.query)
+    security = first(query, "security").lower()
+    default_port = 443 if security in ("tls", "reality") else 80
+    outbound = {
+        "type": "vless",
+        "tag": "proxy-out",
+        "server": u.hostname,
+        "server_port": int(u.port or default_port),
+        "uuid": unquote(u.username),
+        "network": "tcp",
+    }
+    flow = first(query, "flow")
+    if flow:
+        outbound["flow"] = flow
+    if security == "reality":
+        add_reality(outbound, u.hostname, query)
+    elif security == "tls":
+        add_tls(outbound, u.hostname, query, enabled=True)
+    network = first(query, "type", "network", default="tcp")
+    add_transport(outbound, network, query)
+    return outbound
+
+def vmess_outbound(raw_value):
+    payload = raw_value[len("vmess://"):]
+    try:
+        obj = json.loads(b64decode_padded(payload))
+    except Exception as exc:
+        fail(f"Invalid VMess link: {exc}")
+
+    server = obj.get("add") or obj.get("host")
+    port = obj.get("port")
+    uuid = obj.get("id")
+    if not server or not port or not uuid:
+        fail("Invalid VMess link.")
+
+    outbound = {
+        "type": "vmess",
+        "tag": "proxy-out",
+        "server": server,
+        "server_port": int(port),
+        "uuid": uuid,
+        "security": obj.get("scy") or "auto",
+        "alter_id": int(obj.get("aid") or 0),
+        "network": "tcp",
+    }
+
+    tls_value = (obj.get("tls") or "").lower()
+    if tls_value and tls_value != "none":
+        add_tls(outbound, server, enabled=True, server_name=obj.get("sni") or obj.get("host") or server)
+
+    query = {
+        "path": [obj.get("path") or ""],
+        "host": [obj.get("host") or ""],
+        "serviceName": [obj.get("serviceName") or ""],
+    }
+    add_transport(outbound, obj.get("net") or "tcp", query, host_header=obj.get("host") or "", path_value=obj.get("path") or "")
+    return outbound
+
+u = urlparse(raw)
+scheme = (u.scheme or "").lower()
+
+if scheme == "http":
+    outbound = http_outbound(u)
+elif scheme in ("socks", "socks5", "socks4", "socks4a"):
+    outbound = socks_outbound(u)
+elif scheme == "vless":
+    outbound = vless_outbound(u)
+elif scheme == "vmess":
+    outbound = vmess_outbound(raw)
+else:
+    fail("Unsupported proxy/config type.")
+
+config = {
+    "log": {"level": "warn"},
+    "inbounds": [
+        {
+            "type": "mixed",
+            "tag": "local-in",
+            "listen": listen,
+            "listen_port": listen_port,
+            "set_system_proxy": False,
+        }
+    ],
+    "outbounds": [outbound],
+    "route": {"final": "proxy-out"},
+}
+
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(tmp, path)
+PY
+ then
+  err "Could not generate sing-box config. Check your proxy/config link."
+  return 1
+ fi
+ 
+ chmod 600 "$SING_BOX_CONF" || return 1
+}
+
+write_bridge_service() {
+ local bin="$1"
+ local bin_escaped conf_escaped
+ bin_escaped="$(systemd_env_escape "$bin")"
+ conf_escaped="$(systemd_env_escape "$SING_BOX_CONF")"
+
+ cat > "$NBI_BRIDGE_SYSTEMD_SERVICE" <<EOF_BRIDGE_SERVICE
+[Unit]
+Description=NimBridgeIR local proxy bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$bin_escaped run -c $conf_escaped
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF_BRIDGE_SERVICE
+
+ chmod 644 "$NBI_BRIDGE_SYSTEMD_SERVICE"
+}
+
+verify_bridge_local_bind() {
+ local port="${NBI_BRIDGE_PORT:-}"
+ validate_port "$port" || return 1
+
+ if ss -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $4}' | grep -Eq '^(0\.0\.0\.0|\[::\]|\*)'; then
+  err "Local bridge is exposed on a public interface. Stopping it."
+  systemctl stop "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || true
+  return 1
+ fi
+
+ if ! ss -ltn 2>/dev/null | awk -v p=":$port" '$4 ~ p {print $4}' | grep -q "^127\.0\.0\.1:$port\$"; then
+  err "Local bridge did not bind to 127.0.0.1:$port."
+  systemctl stop "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || true
+  return 1
+ fi
+}
+
+stop_local_bridge() {
+ if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+ fi
+}
+
+local_bridge_status() {
+ if ! bridge_needed; then
+  printf 'Not required'
+  return 0
+ fi
+
+ if bridge_service_active && [[ -n "${NBI_BRIDGE_PORT:-}" ]]; then
+  printf 'Running on %s:%s' "$NBI_BRIDGE_LISTEN" "$NBI_BRIDGE_PORT"
+ else
+  printf 'Not running'
+ fi
+}
+
+ensure_local_bridge() {
+ local force="${1:-0}"
+ bridge_needed || return 0
+
+ if [[ "$force" != "1" ]] && bridge_service_active && verify_bridge_local_bind; then
+  return 0
+ fi
+
+ if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 is required for SOCKS/VLESS/VMess configs."
+  return 1
+ fi
+
+ local bin
+ if ! bin="$(sing_box_bin)"; then
+  err "sing-box is required for ${NBI_PROXY_TYPE:-this config}. Put the bundled binary at: /usr/local/lib/nimbridgeir/sing-box"
+  return 1
+ fi
+
+ pick_bridge_port || return 1
+ write_sing_box_config || return 1
+
+ if ! "$bin" check -c "$SING_BOX_CONF" >/dev/null 2>&1; then
+  err "sing-box config check failed. Check your proxy/config link."
+  return 1
+ fi
+
+ if ! command -v systemctl >/dev/null 2>&1; then
+  err "systemd is required for the local bridge service."
+  return 1
+ fi
+
+ write_bridge_service "$bin"
+ systemctl daemon-reload || return 1
+ systemctl enable "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || true
+ systemctl restart "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || {
+  err "Could not restart local bridge."
+  return 1
+ }
+
+ sleep 1
+ verify_bridge_local_bind || return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -355,7 +981,7 @@ restore_latest_interrupted_session() {
 # -----------------------------------------------------------------------------
 
 engine_installed() {
-  command -v proxychains4 >/dev/null 2>&1
+  command -v proxychains4 >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1
 }
 
 write_engine_config() {
@@ -369,10 +995,24 @@ tcp_connect_time_out 8000
 
 [ProxyList]
 EOF_ENGINE
-  if [[ -n "${NBI_PROXY_USER:-}" ]]; then
-    printf 'http %s %s %s %s\n' "$NBI_PROXY_HOST" "$NBI_PROXY_PORT" "$NBI_PROXY_USER" "$NBI_PROXY_PASS" >> "$ENGINE_CONF"
+  local engine_host engine_port engine_user engine_pass
+
+ if bridge_needed; then
+  engine_host="$NBI_BRIDGE_LISTEN"
+  engine_port="${NBI_BRIDGE_PORT:-}"
+  engine_user=""
+  engine_pass=""
   else
-    printf 'http %s %s\n' "$NBI_PROXY_HOST" "$NBI_PROXY_PORT" >> "$ENGINE_CONF"
+  engine_host="$NBI_PROXY_HOST"
+  engine_port="$NBI_PROXY_PORT"
+  engine_user="${NBI_PROXY_USER:-}"
+  engine_pass="${NBI_PROXY_PASS:-}"
+ fi
+
+ if [[ -n "$engine_user" ]]; then
+  printf 'http %s %s %s %s\n' "$engine_host" "$engine_port" "$engine_user" "$engine_pass" >> "$ENGINE_CONF"
+ else
+  printf 'http %s %s\n' "$engine_host" "$engine_port" >> "$ENGINE_CONF"
   fi
   chmod 600 "$ENGINE_CONF"
 }
@@ -403,7 +1043,7 @@ bootstrap_install_engine() {
   apt-get update
   rc=$?
   if [[ $rc -eq 0 ]]; then
-    apt-get install -y proxychains4 curl wget ca-certificates gnupg git lsb-release
+    apt-get install -y proxychains4 curl wget ca-certificates gnupg git lsb-release python3
     rc=$?
   fi
   restore_apt_sources "$session" || true
@@ -434,7 +1074,9 @@ ensure_ready() {
     err "Access is not configured."
     return 1
   fi
+
   bootstrap_install_engine || return 1
+  ensure_local_bridge || return 1
   write_engine_config || return 1
 }
 
@@ -456,43 +1098,122 @@ run_access_quiet() {
 # User actions
 # -----------------------------------------------------------------------------
 
-configure_access() {
-  print_header
-  bold "Configure Access"
-  printf 'Enter your HTTP proxy details.\n\n'
+prompt_basic_proxy_input() {
+  local scheme="$1"
+  local host port user pass auth=""
 
-  local host port user pass
-  read -rp 'Proxy host/IP: ' host
-  read -rp 'Proxy port: ' port
+  NBI_INPUT_RAW=""
+
+  read -rp 'Proxy host/IP or domain: ' host
+  host="$(trim "$host")"
   if [[ -z "$host" ]]; then
     err "Proxy host cannot be empty."
-    pause; return 1
+    return 1
   fi
+
+  read -rp 'Proxy port: ' port
   if ! validate_port "$port"; then
     err "Invalid port."
-    pause; return 1
+    return 1
   fi
 
   read -rp 'Username (optional): ' user
   if [[ -n "$user" ]]; then
     read -rsp 'Password: ' pass
     printf '\n'
-  else
-    pass=""
+    auth="$(urlencode "$user"):$(urlencode "$pass")@"
   fi
 
-  NBI_PROXY_HOST="$host"
-  NBI_PROXY_PORT="$port"
-  NBI_PROXY_USER="$user"
-  NBI_PROXY_PASS="$pass"
-  NBI_ENABLED=1
-  save_config
+  NBI_INPUT_RAW="${scheme}://${auth}${host}:${port}"
+}
 
-  if bootstrap_install_engine && write_engine_config; then
+configure_access() {
+  print_header
+  bold "Configure Access"
+  printf 'Choose your access type.\n\n'
+  cat <<EOF_ACCESS
+1) HTTP proxy
+2) SOCKS proxy
+3) VLESS link
+4) VMess link
+0) Back
+EOF_ACCESS
+  printf '\n'
+ 
+  local raw proxy_choice
+
+ local old_enabled old_type old_raw old_host old_port old_user old_pass old_bridge_port
+
+ old_enabled="${NBI_ENABLED:-0}"
+ old_type="${NBI_PROXY_TYPE:-http}"
+ old_raw="${NBI_PROXY_RAW:-}"
+ old_host="${NBI_PROXY_HOST:-}"
+ old_port="${NBI_PROXY_PORT:-}"
+ old_user="${NBI_PROXY_USER:-}"
+ old_pass="${NBI_PROXY_PASS:-}"
+ old_bridge_port="${NBI_BRIDGE_PORT:-}"
+ 
+  read -rp 'Choose: ' proxy_choice
+  case "$proxy_choice" in
+    1)
+      prompt_basic_proxy_input "http" || { pause; return 1; }
+      raw="$NBI_INPUT_RAW"
+      ;;
+    2)
+      prompt_basic_proxy_input "socks5" || { pause; return 1; }
+      raw="$NBI_INPUT_RAW"
+      ;;
+    3)
+      read -rp 'VLESS link: ' raw
+      ;;
+    4)
+      read -rp 'VMess link: ' raw
+      ;;
+    0)
+      return 0
+      ;;
+    *)
+      warn "Invalid option."
+      pause; return 1
+      ;;
+  esac
+
+ if ! command -v python3 >/dev/null 2>&1; then
+  bootstrap_install_engine || { pause; return 1; }
+ fi
+
+  parse_access_input "$raw" || { pause; return 1; }
+  if ! bridge_needed; then
+    NBI_BRIDGE_PORT=""
+  fi
+
+  if bootstrap_install_engine && ensure_local_bridge 1 && write_engine_config; then
+    if ! bridge_needed; then
+      stop_local_bridge
+    fi
+
+    NBI_ENABLED=1
+    save_config
     ok "Access configured successfully."
     check_connection_compact || true
   else
-    err "Access configuration failed."
+    NBI_ENABLED="$old_enabled"
+    NBI_PROXY_TYPE="$old_type"
+    NBI_PROXY_RAW="$old_raw"
+    NBI_PROXY_HOST="$old_host"
+    NBI_PROXY_PORT="$old_port"
+    NBI_PROXY_USER="$old_user"
+    NBI_PROXY_PASS="$old_pass"
+    NBI_BRIDGE_PORT="$old_bridge_port"
+    save_config
+
+    if [[ "$old_enabled" == "1" && "$old_type" != "http" ]]; then
+      ensure_local_bridge 1 || true
+    else
+      stop_local_bridge
+    fi
+
+    err "Access configuration failed. Previous settings were restored."
   fi
   pause
 }
@@ -557,7 +1278,7 @@ install_ubuntu_package() {
 
 configure_apt_basic_dependencies() {
   cleanup_temp_access_files
-  run_access apt-get update && run_access apt-get install -y curl wget ca-certificates gnupg git lsb-release
+  run_access apt-get update && run_access apt-get install -y curl wget ca-certificates gnupg git lsb-release python3
   return "$?"
 }
 
@@ -581,6 +1302,194 @@ download_file() {
 }
 
 # -----------------------------------------------------------------------------
+# VPN panel installers
+# -----------------------------------------------------------------------------
+
+fetch_3xui_releases() {
+  local page url payload parsed tmp
+  tmp="$(mktemp)"
+  : > "$tmp"
+
+  for page in 1 2 3 4 5 6 7 8 9 10; do
+    url="${NBI_3XUI_RELEASES_API}?per_page=100&page=${page}"
+    payload="$(run_access_quiet curl -fsSL --connect-timeout 20 --max-time 60 "$url")" || {
+      rm -f "$tmp"
+      return 1
+    }
+
+    parsed="$(printf '%s' "$payload" | python3 -c '
+import json
+import re
+import sys
+
+def version_tuple(tag):
+    nums = re.findall(r"\d+", tag or "")
+    nums = [int(x) for x in nums[:3]]
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums)
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(data, list):
+    raise SystemExit(1)
+
+for item in data:
+    if item.get("draft"):
+        continue
+    tag = item.get("tag_name") or ""
+    if not tag:
+        continue
+    if version_tuple(tag) < (2, 3, 5):
+        continue
+    published = item.get("published_at") or item.get("created_at") or ""
+    prerelease = "1" if item.get("prerelease") else "0"
+    print(f"{published}\t{tag}\t{prerelease}")
+')" || {
+      rm -f "$tmp"
+      return 1
+    }
+
+    [[ -z "$parsed" ]] && break
+    printf '%s\n' "$parsed" >> "$tmp"
+  done
+
+  python3 - "$tmp" <<'PY'
+import sys
+
+items = []
+seen = set()
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        published, tag, prerelease = line.split("\t", 2)
+        if tag in seen:
+            continue
+        seen.add(tag)
+        items.append((published, tag, prerelease == "1"))
+
+items.sort(key=lambda x: x[0], reverse=True)
+for _, tag, prerelease in items:
+    label = tag + (" (pre-release)" if prerelease else "")
+    print(f"{tag}\t{label}")
+PY
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+install_3xui_version() {
+  local version="$1" tmp installer rc
+  tmp="$(mktemp -d)"
+  installer="$tmp/3x-ui-install.sh"
+
+  printf 'Downloading official 3x-ui installer...\n'
+  if ! run_access curl -fsSL --connect-timeout 20 --max-time 60 -o "$installer" "$NBI_3XUI_INSTALLER_URL"; then
+    rm -rf "$tmp"
+    err "Could not download 3x-ui installer."
+    return 1
+  fi
+
+  chmod 700 "$installer"
+  printf 'Running 3x-ui installer for %s...\n\n' "$version"
+  run_access bash "$installer" "$version"
+  rc=$?
+  rm -rf "$tmp"
+
+  if [[ $rc -eq 0 ]]; then
+    ok "3x-ui $version installation finished."
+  else
+    err "3x-ui $version installation failed."
+  fi
+  return "$rc"
+}
+
+install_3xui_sanaei_menu() {
+  print_header
+  bold "Install 3x-ui (Sanaei)"
+  ensure_ready || { pause; return 1; }
+
+  local max_releases=15
+  local releases_file releases_count choice selected tag label confirm
+  local -a releases=()
+  releases_file="$(mktemp)"
+
+  printf 'Fetching 3x-ui releases...\n'
+  if ! fetch_3xui_releases > "$releases_file"; then
+    rm -f "$releases_file"
+    err "Could not fetch 3x-ui releases from GitHub."
+    pause; return 1
+  fi
+
+  mapfile -t releases < "$releases_file"
+  rm -f "$releases_file"
+
+  releases_count="${#releases[@]}"
+  if [[ "$releases_count" -eq 0 ]]; then
+    err "No compatible 3x-ui releases were found."
+    pause; return 1
+  fi
+
+  if (( releases_count > max_releases )); then
+    releases=("${releases[@]:0:max_releases}")
+    releases_count="${#releases[@]}"
+  fi
+
+  printf '\nAvailable versions:\n'
+  local i
+  for i in "${!releases[@]}"; do
+    label="${releases[$i]#*$'\t'}"
+    printf '%2d) %s\n' "$((i + 1))" "$label"
+  done
+  printf ' 0) Back\n'
+
+  printf '\nChoose version: '
+  read -r choice
+  if [[ "$choice" == "0" ]]; then
+    return 0
+  fi
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > releases_count )); then
+    warn "Invalid option."
+    pause; return 1
+  fi
+
+  selected="${releases[$((choice - 1))]}"
+  tag="${selected%%$'\t'*}"
+
+  printf '\nThis will run the official 3x-ui installer through NimBridgeIR access.\n'
+  read -rp "Install 3x-ui $tag now? [y/N]: " confirm
+  case "$confirm" in
+    y|Y|yes|YES) install_3xui_version "$tag" ;;
+    *) warn "Canceled." ;;
+  esac
+  pause
+}
+
+vpn_panels_menu() {
+  while true; do
+    load_config
+    print_header
+    bold "VPN Panel Installers"
+    cat <<EOF_MENU
+1) 3x-ui (Sanaei)
+0) Back
+EOF_MENU
+    printf '\nChoose: '
+    read -r choice
+    case "$choice" in
+      1) install_3xui_sanaei_menu ;;
+      0) return 0 ;;
+      *) warn "Invalid option."; pause ;;
+    esac
+  done
+}
+
+# -----------------------------------------------------------------------------
 # Docker tools
 # -----------------------------------------------------------------------------
 
@@ -594,6 +1503,8 @@ configure_docker_access() {
     err "Configure access first."
     return 1
   }
+  ensure_local_bridge || return 1
+
   docker_installed || {
     err "Docker is not installed yet."
     return 1
@@ -611,7 +1522,7 @@ configure_docker_access() {
   proxy="$(proxy_url)"
   no_proxy="${NBI_NO_PROXY:-$NBI_DEFAULT_NO_PROXY}"
 
-  python3 - "$proxy" "$no_proxy" <<'PY'
+  if ! python3 - "$proxy" "$no_proxy" <<'PY'
 import json
 import os
 import sys
@@ -637,6 +1548,11 @@ with open(tmp, "w", encoding="utf-8") as f:
     f.write("\n")
 os.replace(tmp, path)
 PY
+ then
+  err "Could not update Docker daemon.json. Check JSON syntax in /etc/docker/daemon.json."
+  return 1
+ fi
+ chmod 600 /etc/docker/daemon.json 2>/dev/null || true
 
   if command -v systemctl >/dev/null 2>&1; then
     mkdir -p "$(dirname "$DOCKER_SYSTEMD_PROXY_CONF")"
@@ -653,6 +1569,7 @@ Environment="https_proxy=$proxy_escaped"
 Environment="no_proxy=$no_proxy_escaped"
 EOF_DOCKER_PROXY
 
+    chmod 600 "$DOCKER_SYSTEMD_PROXY_CONF" 2>/dev/null || true
     systemctl daemon-reload || true
     systemctl restart docker || {
       err "Docker restart failed. Restoring previous Docker configuration."
@@ -713,7 +1630,7 @@ check_docker_access() {
   print_header
   bold "Check Docker Access"
   docker_installed || { err "Docker is not installed."; pause; return 1; }
-  configure_docker_access || true
+  configure_docker_access || { pause; return 1; }
   printf 'Checking Docker registry access...\n'
   if docker pull hello-world:latest; then
     ok "Docker access is working."
@@ -727,7 +1644,7 @@ pull_docker_image() {
   print_header
   bold "Pull Docker Image"
   docker_installed || { err "Docker is not installed."; pause; return 1; }
-  configure_docker_access || true
+  configure_docker_access || { pause; return 1; }
   local image
   read -rp 'Image name (example: nginx:latest): ' image
   if [[ -z "$image" ]]; then
@@ -817,6 +1734,8 @@ show_status() {
   load_config
   printf 'Access:               %s\n' "$( [[ "${NBI_ENABLED:-0}" == "1" ]] && printf 'Enabled' || printf 'Disabled' )"
   printf 'Proxy:                %s\n' "$(masked_proxy)"
+  printf 'Proxy type:           %s\n' "${NBI_PROXY_TYPE:-http}"
+  printf 'Local bridge:         %s\n' "$(local_bridge_status)"
   printf 'Required tools:       %s\n' "$( engine_installed && printf 'Ready' || printf 'Not prepared' )"
   printf 'Docker:               %s\n' "$( docker_installed && printf 'Installed' || printf 'Not installed' )"
   printf 'Docker access:        %s\n' "$( [[ "${NBI_DOCKER_ACCESS_CONFIGURED:-0}" == "1" ]] && printf 'Enabled' || printf 'Not enabled' )"
@@ -834,8 +1753,13 @@ enable_access() {
   fi
   NBI_ENABLED=1
   save_config
-  bootstrap_install_engine && write_engine_config
-  ok "$APP_NAME enabled."
+  if bootstrap_install_engine && ensure_local_bridge && write_engine_config; then
+    ok "$APP_NAME enabled."
+  else
+    NBI_ENABLED=0
+    save_config
+    err "Could not enable $APP_NAME."
+  fi
   pause
 }
 
@@ -845,6 +1769,8 @@ disable_access() {
   load_config
   NBI_ENABLED=0
   save_config
+
+  stop_local_bridge
 
   local do_restore
   do_restore="${NBI_AUTO_RESTORE_ON_DISABLE:-1}"
@@ -897,7 +1823,8 @@ reset_settings() {
   printf 'This removes the saved proxy details from NimBridgeIR.\n'; printf 'Docker settings are not changed by this option.\n\n'; read -rp 'Continue? [y/N]: ' ans
   case "$ans" in
     y|Y|yes|YES)
-      rm -f "$CONFIG_FILE" "$ENGINE_CONF"
+      stop_local_bridge
+      rm -f "$CONFIG_FILE" "$ENGINE_CONF" "$SING_BOX_CONF"
       create_default_config
       ok "Saved proxy settings were reset."
       ;;
@@ -973,7 +1900,7 @@ first_run_setup() {
 
   print_header
   printf 'Welcome to %s.\n' "$APP_NAME"
-  printf 'Before using the menu, enter your HTTP proxy details once.\n'
+  printf 'Before using the menu, enter your proxy/config once.\n'
   printf 'You can change these details later from Settings.\n\n'
   configure_access || true
 }
@@ -982,6 +1909,7 @@ main_menu() {
   require_root
   ensure_dirs
   load_config
+  restore_latest_interrupted_session || true
   first_run_setup
 
   while true; do
@@ -993,7 +1921,8 @@ main_menu() {
 3) Install Ubuntu Package
 4) Docker Tools
 5) Download File
-6) Settings
+6) VPN Panel Installers
+7) Settings
 0) Exit
 EOF_MENU
     printf '\nChoose: '
@@ -1004,7 +1933,8 @@ EOF_MENU
       3) install_ubuntu_package ;;
       4) docker_tools_menu ;;
       5) download_file ;;
-      6) settings_menu ;;
+      6) vpn_panels_menu ;;
+      7) settings_menu ;;
       0) exit 0 ;;
       *) warn "Invalid option."; pause ;;
     esac

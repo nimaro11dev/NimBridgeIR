@@ -10,6 +10,8 @@ SHORT_BIN="/usr/local/bin/nbi"
 LIB_DIR="/usr/local/lib/nimbridgeir"
 LOG_FILE="/var/log/nimbridgeir.log"
 DOCKER_SYSTEMD_PROXY_CONF="/etc/systemd/system/docker.service.d/nimbridgeir-access.conf"
+NBI_BRIDGE_SERVICE="nimbridgeir-bridge.service"
+NBI_BRIDGE_SYSTEMD_SERVICE="/etc/systemd/system/$NBI_BRIDGE_SERVICE"
 
 require_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -49,6 +51,19 @@ cleanup_temp_files() {
   rm -f /etc/apt/sources.list.d/nimbridgeir-bootstrap.list 2>/dev/null || true
 }
 
+cleanup_bridge() {
+ if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now "$NBI_BRIDGE_SERVICE" >/dev/null 2>&1 || true
+ fi
+
+ rm -f "$NBI_BRIDGE_SYSTEMD_SERVICE"
+ rm -f "$CONFIG_DIR/sing-box.json"
+
+ if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload >/dev/null 2>&1 || true
+ fi
+}
+
 main() {
   require_root
 
@@ -77,6 +92,8 @@ EOF_HELP
     restore_docker_baseline || true
     cleanup_temp_files
   fi
+
+  cleanup_bridge
 
   rm -f "$INSTALL_BIN" "$SHORT_BIN"
   rm -rf "$LIB_DIR"
