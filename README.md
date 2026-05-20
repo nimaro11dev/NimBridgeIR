@@ -218,7 +218,7 @@ sudo nimbridgeir
 ```
 
 <p dir="rtl" align="right">
-+اگر تنظیمات دسترسی هنوز ثبت نشده باشد، برنامه همان ابتدا نوع دسترسی و اطلاعات لازم را از شما می‌پرسد. بعداً هر زمان خواستید، می‌توانید از مسیر زیر تنظیمات را تغییر دهید:
+اگر تنظیمات دسترسی هنوز ثبت نشده باشد، برنامه همان ابتدا نوع دسترسی و اطلاعات لازم را از شما می‌پرسد. بعداً هر زمان خواستید، می‌توانید از مسیر زیر تنظیمات را تغییر دهید:
 </p>
 
 ```text
@@ -470,48 +470,6 @@ sudo bash /usr/local/lib/nimbridgeir/uninstall.sh --purge
 
 ```bash
 sudo bash /usr/local/lib/nimbridgeir/uninstall.sh --no-restore
-```
-
----
-
-<h2 dir="rtl" align="right">خطاهای رایج</h2>
-
-<h3 dir="rtl" align="right">Docker pull خطای timeout می‌دهد</h3>
-
-<p dir="rtl" align="right">
-اول این گزینه را تست کنید:
-</p>
-
-```text
-Docker Tools > Check Docker Access
-```
-
-<p dir="rtl" align="right">
-اگر باز هم خطا گرفتید، تنظیمات دسترسی را از بخش Settings دوباره وارد کنید یا Proxy/کانفیگ دیگری تست کنید.
-</p>
-
-<h3 dir="rtl" align="right">apt update کار نمی‌کند</h3>
-
-<p dir="rtl" align="right">
-از منوی اصلی این گزینه را تست کنید:
-</p>
-
-```text
-Check Connection
-```
-
-<p dir="rtl" align="right">
-اگر Ubuntu Packages یا General HTTPS خطا داشت، معمولاً مشکل از Proxy یا اتصال سرور است.
-</p>
-
-<h3 dir="rtl" align="right">Proxy یا کانفیگ را اشتباه وارد کردم</h3>
-
-<p dir="rtl" align="right">
-از این مسیر دوباره اطلاعات را وارد کنید:
-</p>
-
-```text
-Settings > Reconfigure Access
 ```
 
 ---
